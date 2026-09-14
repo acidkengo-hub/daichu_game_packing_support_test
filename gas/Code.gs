@@ -95,8 +95,39 @@ var TEXT_COLUMNS = {
  * ブラウザで開いたときの応答。
  * 記録は一切返さない。デプロイが生きているかを目視で確かめるためだけのもの。
  */
-function doGet() {
-  return textJson({ ok: true, message: "梱包作業記録API は動作しています" });
+/**
+ * GET で読み取れるもの。
+ *
+ * 【なぜ GET なのか】
+ * POST の応答はブラウザから読めない。GAS は応答を
+ * script.googleusercontent.com の使い捨てURLへ転送するが、
+ * POST 経由だとその転送先が 404 を返す（2026-09-14 に実測）。
+ * GET 経由なら 200 で読める。
+ *
+ * 【なぜ登録キーを求めないのか】
+ * GET でキーを渡すとURLに残り、ブラウザの履歴やログに記録される。
+ * ここで読めるのは作業者の名前一覧だけで、
+ * 時刻・伝票・管理番号といった記録は一切返さない。
+ * 名前は店頭で働いている以上隠しきれる情報ではないと判断した
+ * （辻川さんの判断、2026-09-14）。
+ * 書き込みは引き続きキーで守るため、例外#20 は維持される。
+ */
+function doGet(e) {
+  var action = (e && e.parameter && e.parameter.action) || "";
+
+  if (action === "workers.list") {
+    return textJson({ ok: true, workers: listWorkers() });
+  }
+
+  // 既定の応答。デプロイされている版を外から確かめるための印。
+  // エディタ上のコードとデプロイ済みのコードは別物になりうるため、
+  // 「今このURLで動いているのはどの版か」を答えられるようにしておく。
+  return textJson({
+    ok: true,
+    message: "梱包作業記録API は動作しています",
+    build: "2026-09-14-get-workers",
+    hasCellText: (typeof cellText === "function"),
+  });
 }
 
 /**
@@ -401,12 +432,15 @@ function updateWorkRecord(ev, patch) {
 }
 
 /** 作業記録シートから、同じ「日付×便×配送方法×作業者」の行番号を探す（なければ -1） */
+/** 作業記録シートから、同じ「日付×便×配送方法×作業者」の行番号を探す（なければ -1） */
 function findWorkRow(sheet, ev) {
   var last = sheet.getLastRow();
   if (last < 2) return -1;
 
   var values = sheet.getRange(2, 1, last - 1, COL_WORK_WORKER).getValues();
   for (var i = 0; i < values.length; i++) {
+    // シートから読んだ値は Date になっていることがあるため、
+    // 必ず cellText を通してから比べる（2026-09-14 の調査で確定）。
     if (
       cellText(values[i][COL_WORK_DATE - 1], "yyyy-MM-dd") === ev.date &&
       String(values[i][COL_WORK_BIN - 1]) === ev.bin &&

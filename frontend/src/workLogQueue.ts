@@ -1,0 +1,415 @@
+/**
+ * 作業記録の送信キュー
+ *
+ * 記録の計算は workLog.ts、送信はこのファイルが担当する。
+ * 分けている理由は、通信が切れても計算は続けられるようにするため
+ * （要求仕様 8章 可用性）。
+ *
+ * 【重要】未送信の記録は、既存の作業データとは別のキーに保存する。
+ * 「新しい日を開始（全データ削除）」で消えてはいけないため（例外#16）。
+ */
+
+// ===== 型 =====
+
+/** 送信する出来事。workLog.ts が作ったものをそのまま受け取る */
+export type WorkLogEvent = Record<string, unknown> & { id: string };
+
+/** 送信先の設定 */
+export interface QueueConfig {
+  url: string;
+  key: string;
+}
+
+// ===== 定数 =====
+
+/**
+ * 未送信の記録を置く場所。
+ * 既存の作業データ（WorkDay）とは別のキーにすること。
+ * 全データ削除でこのキーを消さないよう、App 側でも注意する。
+ */
+const QUEUE_KEY = "game-packing-worklog-queue";
+
+/** 送信先の設定を置く場所。登録キーを含むため、コードには書かない（§4-3） */
+const CONFIG_KEY = "game-packing-worklog-config";
+
+/** 溜めてから送るまでの待ち時間（ミリ秒） */
+const FLUSH_DELAY_MS = 3000;
+
+/** 失敗したときに次に試すまでの時間（ミリ秒） */
+const RETRY_DELAY_MS = 60 * 1000;
+
+/** 1回に送る最大件数。多すぎると GAS の実行時間を超える */
+const MAX_BATCH = 30;
+
+// ===== 設定の読み書き =====
+
+/**
+ * 送信先の設定を読む。
+ *
+ * ⚠️ 登録キーは暗号化されずに localStorage に保存される。
+ * iPad を手に取って開発者ツールを使える人なら読める。
+ * 店内の共用 iPad という前提で、この水準を許容している（2026-09 の判断）。
+ */
+export function loadConfig(): QueueConfig | null {
+  try {
+    const raw = localStorage.getItem(CONFIG_KEY);
+    if (!raw) return null;
+    const config = JSON.parse(raw) as QueueConfig;
+    if (!config.url || !config.key) return null;
+    return config;
+  } catch (e) {
+    console.error(
+      "[workLogQueue] 設定を読めませんでした\n" +
+        "　→ 設定画面から登録キーを入力し直してください",
+      e
+    );
+    return null;
+  }
+}
+
+export function saveConfig(config: QueueConfig | null): void {
+  if (config === null) {
+    localStorage.removeItem(CONFIG_KEY);
+    return;
+  }
+  localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+}
+
+/** 記録が有効かどうか。設定が入っていなければ記録しない */
+export function isConfigured(): boolean {
+  return loadConfig() !== null;
+}
+
+// ===== キューの読み書き =====
+
+function loadQueue(): WorkLogEvent[] {
+  try {
+    const raw = localStorage.getItem(QUEUE_KEY);
+    if (!raw) return [];
+    const queue = JSON.parse(raw) as WorkLogEvent[];
+    return Array.isArray(queue) ? queue : [];
+  } catch (e) {
+    console.error(
+      "[workLogQueue] 未送信の記録を読めませんでした\n" +
+        "　→ DevTools → Application → Local Storage の " +
+        QUEUE_KEY +
+        " を確認してください",
+      e
+    );
+    return [];
+  }
+}
+
+function saveQueue(queue: WorkLogEvent[]): void {
+  try {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
+  } catch (e) {
+    console.error(
+      "[workLogQueue] 未送信の記録を保存できませんでした\n" +
+        "　→ localStorage の容量を確認してください。" +
+        "梱包作業自体は続けられます",
+      e
+    );
+  }
+}
+
+/** 未送信の件数。設定画面で状況を見るために使う */
+export function pendingCount(): number {
+  return loadQueue().length;
+}
+
+// ===== 送信 =====
+
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let sending = false;
+
+/**
+ * 出来事をキューに入れる。
+ *
+ * すぐには送らず、少し待ってからまとめて送る。
+ * 伝票を完了するたびに送ると、繁忙期100件超の日に通信が増えるため。
+ */
+export function enqueue(event: WorkLogEvent | null): void {
+  if (!event) return;
+  if (!isConfigured()) return;
+
+  const queue = loadQueue();
+  queue.push(event);
+  saveQueue(queue);
+
+  scheduleFlush(FLUSH_DELAY_MS);
+}
+
+/** 送信を予約する。すでに予約があれば何もしない */
+function scheduleFlush(delay: number): void {
+  if (flushTimer !== null) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void flush();
+  }, delay);
+}
+
+/**
+ * 溜まっている記録を送る。
+ *
+ * 【応答を読まない理由】
+ * GAS は応答を script.googleusercontent.com の使い捨てURLへ転送するが、
+ * POST 経由だとその転送先が不定期に404を返す（2026-09-14 に実測）。
+ * 一方、書き込み自体は成功している（HTMLが返った回もシートに記録されていた）。
+ * そのため「送れたら成功」とみなし、応答を待たずにキューから消す。
+ *
+ * 誤って消してしまうリスクより、永久に再送し続けるリスクの方が大きい。
+ * 同じ記録を何度送っても、受け側がIDで重複を弾くため二重記録にはならない。
+ *
+ * 失敗しても例外を投げない。梱包作業を止めないため（要求仕様 8章）。
+ */
+export async function flush(): Promise<void> {
+  if (sending) return;
+
+  const config = loadConfig();
+  if (!config) return;
+
+  const queue = loadQueue();
+  if (queue.length === 0) return;
+
+  sending = true;
+  const batch = queue.slice(0, MAX_BATCH);
+  const batchIds = new Set(batch.map((e) => e.id));
+
+  try {
+    await fetch(config.url, {
+      method: "POST",
+      // application/json にすると、ブラウザが事前確認の通信を挟む。
+      // GAS はそれに応答できないため、通信自体が失敗する。
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({
+        key: config.key,
+        action: "log",
+        events: batch,
+      }),
+      // 応答は読めないので、読もうとしない。
+      // no-cors にすると転送先の404で例外にならず、
+      // 「送信できた」ことだけが分かる。
+      mode: "no-cors",
+    });
+
+    // ここに来たら、少なくとも送信は完了している。
+    // この間に増えた分を消さないよう、読み直してから絞り込む。
+    const current = loadQueue();
+    saveQueue(current.filter((e) => !batchIds.has(e.id)));
+
+    // まだ残っていれば続けて送る
+    if (loadQueue().length > 0) {
+      scheduleFlush(FLUSH_DELAY_MS);
+    }
+  } catch (e) {
+    // 通信の切断はここに来る。キューはそのまま残り、後で再送される
+    // （例外#15）。梱包作業は止めない。
+    console.warn(
+      "[workLogQueue] 送信できませんでした。後で再送します\n" +
+        `　→ 未送信 ${loadQueue().length} 件`,
+      e
+    );
+    scheduleFlush(RETRY_DELAY_MS);
+  } finally {
+    sending = false;
+  }
+}
+
+/**
+ * 再送の仕組みを動かし始める。
+ *
+ * ツールを開いたときに1回呼ぶ。前回の未送信分がここで送られる。
+ * 通信が戻ったときにも送る（オフラインからの復帰）。
+ */
+export function startQueue(): void {
+  if (pendingCount() > 0) {
+    scheduleFlush(FLUSH_DELAY_MS);
+  }
+
+  window.addEventListener("online", () => {
+    if (pendingCount() > 0) scheduleFlush(0);
+  });
+
+  // 画面に戻ってきたときにも試す。
+  // iPad はスリープ中にタイマーが止まるため、復帰の合図が要る。
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && pendingCount() > 0) {
+      scheduleFlush(FLUSH_DELAY_MS);
+    }
+  });
+}
+
+// ===== 作業者の一覧 =====
+
+/**
+ * GET で読み取る。
+ *
+ * 【なぜ GET なのか】
+ * POST の応答はブラウザから読めない。GAS が応答を転送する
+ * 使い捨てURLが、POST 経由だと不定期に404を返すため（2026-09-14 に実測）。
+ * GET 経由なら安定して読める。
+ *
+ * 【なぜ登録キーを付けないのか】
+ * GET でキーを渡すとURLに残り、履歴やログに記録される。
+ * 読めるのは作業者の名前一覧だけで、記録は一切返さない設計にしてある。
+ */
+async function getJson<T>(url: string, action: string): Promise<T | null> {
+  try {
+    const target = `${url}?action=${encodeURIComponent(action)}`;
+    const response = await fetch(target, { method: "GET" });
+
+    if (!response.ok) {
+      throw new Error(
+        `読み取れませんでした（HTTP ${response.status}）\n` +
+          "　→ デプロイのアクセス権限が「全員」か確認してください"
+      );
+    }
+    return (await response.json()) as T;
+  } catch (e) {
+    console.error(
+      `[workLogQueue] ${action} の取得に失敗しました\n` +
+        "　→ 設定画面のURLと、通信の状態を確認してください",
+      e
+    );
+    return null;
+  }
+}
+
+/**
+ * 作業者の一覧を取り出す。
+ *
+ * 記録（時刻・伝票）は読み出さない。名前の一覧だけを読む例外
+ * （2台のiPadで同じ一覧を使うため。要求仕様 4-3(4)）。
+ */
+export async function fetchWorkers(): Promise<string[] | null> {
+  const config = loadConfig();
+  if (!config) return null;
+
+  const result = await getJson<{ ok: boolean; workers?: string[] }>(
+    config.url,
+    "workers.list"
+  );
+  if (!result || !result.ok) return null;
+  return result.workers ?? [];
+}
+
+/**
+ * 作業者を追加する。
+ *
+ * 書き込みなので POST。応答は読めないため、
+ * 少し待ってから GET で一覧を取り直し、反映されたかを確かめる。
+ */
+export async function addWorker(name: string): Promise<string[] | null> {
+  return changeWorkers("workers.add", name);
+}
+
+/** 作業者を一覧から外す。過去の記録は残る（要求仕様 4-3(4)） */
+export async function removeWorker(name: string): Promise<string[] | null> {
+  return changeWorkers("workers.remove", name);
+}
+
+async function changeWorkers(
+  action: string,
+  name: string
+): Promise<string[] | null> {
+  const config = loadConfig();
+  if (!config) return null;
+
+  const label = action === "workers.add" ? "追加" : "削除";
+
+  try {
+    await fetch(config.url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ key: config.key, action, name }),
+      mode: "no-cors",
+    });
+  } catch (e) {
+    console.error(
+      `[workLogQueue] 作業者の${label}を送れませんでした\n` +
+        "　→ 通信の状態を確認してください",
+      e
+    );
+    return null;
+  }
+
+  // 書き込みが反映されるまで少し待つ。
+  // GAS の処理が終わる前に読むと、変更前の一覧が返ってくる。
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  return fetchWorkers();
+}
+
+/**
+ * 設定が正しいかを確かめる。設定画面で使う。
+ *
+ * ⚠️ 確かめられるのは「URLが正しく、GASが動いていること」まで。
+ * 登録キーが正しいかは、書き込みの応答が読めないため確認できない。
+ * キーの確認は、作業者を1名追加してみて一覧に現れるかで判定する。
+ */
+export async function testConnection(
+  config: QueueConfig
+): Promise<{ ok: boolean; message: string }> {
+  const result = await getJson<{ ok: boolean; workers?: string[] }>(
+    config.url,
+    "workers.list"
+  );
+
+  if (!result) {
+    return {
+      ok: false,
+      message: "つながりませんでした。URLと通信の状態を確認してください",
+    };
+  }
+
+  if (!result.ok) {
+    return { ok: false, message: "応答が不正です。URLを確認してください" };
+  }
+
+  return {
+    ok: true,
+    message: `つながりました（作業者 ${result.workers?.length ?? 0} 名）`,
+  };
+}
+
+/**
+ * 登録キーが正しいかを確かめる。
+ *
+ * 仮の名前を追加してみて、一覧に現れるかで判定する。
+ * 現れたらキーは正しいので、その名前を削除して元に戻す。
+ *
+ * 書き込みの応答が読めない以上、実際に書いてみるしか確かめる方法がない。
+ */
+export async function testKey(
+  config: QueueConfig
+): Promise<{ ok: boolean; message: string }> {
+  const probe = `__確認用_${Date.now()}`;
+
+  const saved = loadConfig();
+  saveConfig(config);
+
+  try {
+    const after = await addWorker(probe);
+
+    if (!after) {
+      return {
+        ok: false,
+        message: "確認できませんでした。通信の状態を確認してください",
+      };
+    }
+
+    if (!after.includes(probe)) {
+      return {
+        ok: false,
+        message: "登録キーが違います。設定画面で入力し直してください",
+      };
+    }
+
+    // 後始末。確認用の名前を消す。
+    await removeWorker(probe);
+    return { ok: true, message: "登録キーは正しく設定されています" };
+  } finally {
+    if (!saved) saveConfig(config);
+  }
+}
