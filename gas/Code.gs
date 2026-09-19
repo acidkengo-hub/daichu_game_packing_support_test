@@ -227,6 +227,17 @@ function doPost(e) {
         "　→ Apps Script の「実行数」画面でログを確認してください",
     });
   } finally {
+    // 書き込みを確定させてからロックを解く。
+    //
+    // スプレッドシートへの書き込みは保留され、すぐには他の実行から読めない。
+    // これを呼ばないと、次の doPost が古い状態を読み、
+    // 既にある行を見つけられずに新しい行を作ってしまう
+    // （2026-09-19 に実測。伝票1件ごとに作業記録が1行ずつ増えた）。
+    try {
+      SpreadsheetApp.flush();
+    } catch (err) {
+      console.error("flush に失敗しました: " + err.message);
+    }
     lock.releaseLock();
   }
 }
