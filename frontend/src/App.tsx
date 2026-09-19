@@ -537,8 +537,28 @@ export default function App() {
   }, [pendingStart, activeSlot, updateSession, applyCarrierSelect]);
 
   /** 中断位置から梱包を再開 */
+  /**
+   * 中断位置から梱包を再開する。
+   *
+   * 記録が有効なら、ここでも担当者選択を挟む。
+   * 途中で退勤して次の人に iPad を渡す場合があり、
+   * 再開時こそ担当者の確認が要る（要求仕様 3章 Before 5）。
+   * ここを素通りさせると、記録されないまま作業が進む。
+   */
   const handleResume = useCallback((slot: ShipmentSlot, carrier: "takkyubin" | "nekopos", index: number) => {
     setActiveSlot(slot);
+
+    if (!isConfigured() || rpgMode) {
+      applyResume(slot, carrier, index);
+      return;
+    }
+
+    setPendingStart({ carrier, startIdx: index });
+    setPhase("workerSelect");
+  }, [rpgMode]);
+
+  /** 実際に梱包画面へ戻す。進捗の復元だけを行う */
+  const applyResume = useCallback((slot: ShipmentSlot, carrier: "takkyubin" | "nekopos", index: number) => {
     const session = workDay?.[slot] ?? null;
     setSelectedCarrier(carrier);
     setPickingChecked(session?.pickingChecked?.[carrier] ?? {});
@@ -706,6 +726,17 @@ export default function App() {
    * ここでは結果を受けて画面状態を更新するだけ。
    */
   const handleLogoTap = useCallback(() => {
+    // 記録中はRPGモードを有効にできない（要求仕様 4-2(11)）。
+    // タップを数える前に止めるので、7回押しても何も起きない。
+    //
+    // メッセージは出さない。RPGモードの存在自体が隠し機能であり、
+    // 「有効にできません」と出すと他の作業者に存在を気づかれるため。
+    // 有効にしたいときは、先に担当終了してから押す。
+    //
+    // 無効にする側は妨げない。RPGモード中は記録していないため、
+    // 止める理由がない。
+    if (workSession && !rpgMode) return;
+
     const result = registerTap();
     setTapHint(result.showHint ? result.count : 0);
 
@@ -716,7 +747,7 @@ export default function App() {
     setTapHint(0);
     // ONにしたときだけタイトル画面を出す。OFFのときは静かに戻す
     setShowQuestTitle(enabled);
-  }, []);
+  }, [workSession, rpgMode]);
 
   /** 新しい日を開始（全データ削除） */
   const handleClearAll = useCallback(() => {
@@ -1523,7 +1554,9 @@ export default function App() {
           showEnd
           onBack={() => {
             setMenuOpen(false);
-            setPhase("pickingSummary");
+            setSelectedCarrier(null);
+            setActiveSlot(null);
+            setPhase("home");
           }}
           onChangeWorker={() => {
             setMenuOpen(false);
