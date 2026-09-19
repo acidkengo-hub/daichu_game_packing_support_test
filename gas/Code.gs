@@ -699,7 +699,16 @@ function formatTime(iso) {
  */
 function cellText(value, pattern) {
   if (value === null || value === undefined || value === "") return "";
-  if (value instanceof Date) return Utilities.formatDate(value, tz(), pattern);
+
+  // ⚠️ instanceof Date は使えない。
+  // スプレッドシートのサービスが返す Date は、
+  // スクリプト実行環境の Date とは別の型として扱われ、
+  // instanceof が false になる（2026-09-19 に実測）。
+  // 代わりに getTime を持つかどうかで判定する。
+  if (value && typeof value.getTime === "function") {
+    return Utilities.formatDate(value, tz(), pattern);
+  }
+
   return String(value);
 }
 
