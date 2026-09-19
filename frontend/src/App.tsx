@@ -12,6 +12,7 @@ import { getSetImageUrl } from "./imageMapping";
 import { detectShop, isFlyerAlertEnabled, FLYER_ALERT_TEXT } from "./shopColors";
 import { initFontSize } from "./uiSettings";
 import WorkerSelectScreen from "./WorkerSelectScreen";
+import WorkMenuSheet from "./WorkMenuSheet";
 import {
   type WorkSession,
   loadSession,
@@ -21,6 +22,7 @@ import {
   completeSlip,
   cancelSlip,
   endSession,
+  changeWorker,
   shouldAutoEnd,
 } from "./workLog";
 import { isConfigured, enqueue, startQueue } from "./workLogQueue";
@@ -168,11 +170,58 @@ export default function App() {
     () => localStorage.getItem("game-packing-last-worker")
   );
 
+
+  /**
+   * ピッキングをスキップして梱包へ進んだか。
+   *
+   * ピッキング画面から pickingSummary を経て梱包へ進むため、
+   * 画面をまたいで引き継ぐ必要がある。
+   * 全部チェックした回とスキップした回を区別して記録する（要求仕様 4-2(4)）。
+   */
+  const [pickingSkipped, setPickingSkipped] = useState(false);
   /** 記録中の状態を変えるときは、必ず保存も行う（再読み込みで復帰するため） */
   const updateSession = useCallback((next: WorkSession | null) => {
     setWorkSession(next);
     saveSession(next);
   }, []);
+
+  /** 作業中のメニューを開いているか */
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  /** 担当者の変更中か。WorkerSelectScreen を使い回す */
+  const [changingWorker, setChangingWorker] = useState(false);
+
+  /**
+   * 担当終了。
+   * 終了は取り消せないため、確認は WorkMenuSheet 側で挟んでいる（要求仕様 5章）。
+   */
+  const handleEndWork = useCallback(() => {
+    if (workSession) {
+      enqueue(endSession(workSession, "担当終了").event);
+      updateSession(null);
+    }
+    setMenuOpen(false);
+    setSelectedCarrier(null);
+    setActiveSlot(null);
+    setPhase("home");
+  }, [workSession, updateSession]);
+
+  /**
+   * 担当者を変更した。
+   *
+   * 1件も完了していなければ「修正」、1件以上なら「交替」になる。
+   * 判定は workLog.ts の changeWorker が行う（要求仕様 4-2(7)）。
+   */
+  const handleWorkerChanged = useCallback((worker: string) => {
+    if (workSession) {
+      const result = changeWorker(workSession, worker);
+      enqueue(result.event);
+      updateSession(result.session);
+    }
+    setLastWorker(worker);
+    localStorage.setItem("game-packing-last-worker", worker);
+    setChangingWorker(false);
+  }, [workSession, updateSession]);
 
   // 前回の未送信分を送る仕組みを動かす（例外#15、#16）
   useEffect(() => {
@@ -506,7 +555,12 @@ export default function App() {
     setPickingChecked((prev) => ({ ...prev, [itemName]: !prev[itemName] }));
   }, []);
 
-  const handlePickingComplete = useCallback(() => {
+  /**
+   * ピッキングを終えて pickingSummary へ進む。
+   * skipped は「全部チェックせずスキップで進んだか」。
+   */
+  const handlePickingComplete = useCallback((skipped = false) => {
+    setPickingSkipped(skipped);
     setPhase("pickingSummary");
   }, []);
 
@@ -514,13 +568,17 @@ export default function App() {
    * ピッキングを終えて梱包へ進む。
    * ここで伝票の時間の起点が決まる（要求仕様 4-2(5)）。
    */
-  const handleStartPacking = useCallback((skipped = false) => {
+  /**
+   * ピッキングを終えて梱包へ進む。
+   * ここで伝票の時間の起点が決まる（要求仕様 4-2(5)）。
+   */
+  const handleStartPacking = useCallback(() => {
     if (workSession) {
-      updateSession(enterPacking(workSession, skipped));
+      updateSession(enterPacking(workSession, pickingSkipped));
     }
     setShowPackingGuide(!hasSeenGuide("packing"));
     setPhase("packing");
-  }, [workSession, updateSession]);
+  }, [workSession, updateSession, pickingSkipped]);
 
   const handlePackingSetToggle = useCallback((mgmtNo: string, compName: string) => {
     setPackingSetChecked((prev) => {
@@ -681,8 +739,30 @@ export default function App() {
     setNotice("");
     setPhase("home");
     if (fileInputRef.current) fileInputRef.current.value = "";
-  }, []);
 
+    // 記録中なら、そこまでの分を送って閉じる。
+    // 「新しい日を開始」は前の作業を畳む操作なので、
+    // 記録だけ前日のまま続くのは筋が通らない。
+    // それまでの記録は捨てずに残す。
+    if (workSession) {
+      enqueue(endSession(workSession, "担当終了").event);
+      saveSession(null);
+      setWorkSession(null);
+    }
+
+    // 担当者の選択も消す。
+    // 前日の人が初期選択のまま残ると、
+    // 誤った名前で記録が始まりうる。
+    // この記録はクレーム時に「誰が梱包したか」を確認する用途でも使うため、
+    // 1タップの手間より正確さを優先する（要求仕様 0-2、1章）。
+    localStorage.removeItem("game-packing-last-worker");
+    setLastWorker(null);
+
+    // ⚠️ 未送信キュー（game-packing-worklog-queue）は消さない。
+    // 例外#16「未送信の記録は全データ削除でも失われない」のため。
+    // 送信先の設定（game-packing-worklog-config）も消さない。
+    // 消すと記録が止まり、設定し直すまで気づけない。
+  }, [workSession]);
   // ============================================================
   // DAICHUクエスト タイトル画面（シークレット解除直後に1回だけ）
   // ============================================================
@@ -720,6 +800,22 @@ export default function App() {
           setPendingStart(null);
           setPhase("home");
         }}
+      />
+    );
+  }
+
+  // 作業中に担当者を変更する。開始画面と同じ部品を使い回す。
+  if (changingWorker && workSession) {
+    return (
+      <WorkerSelectScreen
+        binLabel={workSession.bin}
+        carrierLabel={workSession.carrier}
+        orderCount={0}
+        pickingCount={0}
+        lastWorker={workSession.worker}
+        changeMode
+        onStart={(worker) => handleWorkerChanged(worker)}
+        onBack={() => setChangingWorker(false)}
       />
     );
   }
@@ -1180,15 +1276,15 @@ export default function App() {
           <div className="max-w-[780px] mx-auto space-y-2">
             {allChecked ? (
               <button
-                onClick={handlePickingComplete}
-                className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-4 
+                onClick={() => handlePickingComplete(false)}
+              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-4 
                            rounded-xl text-lg font-bold min-h-[56px] transition-colors"
               >
                 ピッキング完了 → 梱包へ
               </button>
             ) : (
               <button
-                onClick={handlePickingComplete}
+                onClick={() => handlePickingComplete(true)}
                 className="w-full bg-gray-700 hover:bg-gray-600 text-gray-300 py-3 
                            rounded-xl text-base min-h-[48px] transition-colors"
               >
@@ -1224,7 +1320,7 @@ export default function App() {
           </div>
 
           <button
-            onClick={() => handleStartPacking(false)}
+            onClick={handleStartPacking}
             className="w-full bg-blue-600 hover:bg-blue-500 text-white py-4 
                        rounded-xl text-lg font-bold min-h-[56px]"
           >
@@ -1405,13 +1501,30 @@ export default function App() {
     return (
       <>
       {imageModalEl}
+      {menuOpen && (
+        <WorkMenuSheet
+          recording={workSession !== null}
+          worker={workSession?.worker ?? null}
+          showEnd
+          onBack={() => {
+            setMenuOpen(false);
+            setPhase("pickingSummary");
+          }}
+          onChangeWorker={() => {
+            setMenuOpen(false);
+            setChangingWorker(true);
+          }}
+          onEndWork={handleEndWork}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
       <div className={`min-h-screen bg-gray-950 text-gray-100 flex flex-col border-4 ${shop.frame}`}>
         {/* ヘッダ */}
         <header className="bg-gray-900 border-b border-gray-800 px-4 py-3 sticky top-0 z-10">
           <div className="max-w-[780px] mx-auto">
             {/* 上段: 戻る / 便バッジ / キャリア */}
             <div className="flex items-center justify-between">
-              <button onClick={() => setPhase("pickingSummary")} className="text-gray-400 hover:text-white min-h-[44px] px-2">
+              <button onClick={() => setMenuOpen(true)} className="text-gray-400 hover:text-white min-h-[44px] px-2">
                 ← 戻る
               </button>
               <div className="flex items-center gap-2">

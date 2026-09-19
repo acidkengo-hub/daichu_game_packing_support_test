@@ -23,16 +23,22 @@ interface Props {
   pickingCount: number;
   /** 前回この端末で選ばれた担当者。初期選択に使う */
   lastWorker: string | null;
+  /**
+   * 作業中の担当者変更として使うか。
+   * true なら開始方法（ピッキング／梱包）を選ばせず、名前を選んだ時点で確定する。
+   * 作業はすでに始まっているため、開始方法を選び直す意味がない。
+   */
+  changeMode?: boolean;
   onStart: (worker: string, fromPicking: boolean) => void;
   onBack: () => void;
 }
-
 export default function WorkerSelectScreen({
   binLabel,
   carrierLabel,
   orderCount,
   pickingCount,
   lastWorker,
+  changeMode = false,
   onStart,
   onBack,
 }: Props) {
@@ -51,7 +57,11 @@ export default function WorkerSelectScreen({
     });
   }, [lastWorker]);
 
-  const canStart = selected !== null;
+  // 一覧を読み込むまでは開始させない。
+  // 前回の担当者を初期選択にしているため、
+  // 読み込み前でも selected に値が入っている。
+  // そのまま開始すると、一覧から消えた人の名前で記録が始まりうる。
+  const canStart = selected !== null && workers !== null && workers.length > 0;
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 p-4">
@@ -72,7 +82,9 @@ export default function WorkerSelectScreen({
         </div>
 
         {/* 担当者 */}
-        <p className="text-base font-bold mb-3">担当者を選んでください</p>
+        <p className="text-base font-bold mb-3">
+          {changeMode ? "新しい担当者を選んでください" : "担当者を選んでください"}
+        </p>
 
         {workers === null && (
           <p className="text-sm text-gray-500 mb-6">読み込んでいます…</p>
@@ -94,7 +106,12 @@ export default function WorkerSelectScreen({
             {workers.map((name) => (
               <button
                 key={name}
-                onClick={() => setSelected(name)}
+                onClick={() => {
+                  setSelected(name);
+                  // 変更のときは、選んだ時点で確定する。
+                  // 開始方法を選び直す必要がないため。
+                  if (changeMode) onStart(name, false);
+                }}
                 className={`rounded-xl border-2 py-4 min-h-[72px] text-lg font-bold transition-colors ${
                   selected === name
                     ? "bg-emerald-700 border-emerald-500 text-white"
@@ -107,8 +124,8 @@ export default function WorkerSelectScreen({
           </div>
         )}
 
-        {/* 作業開始。担当者を選ぶまで押せない */}
-        <div className="space-y-3">
+        {/* 作業開始。担当者を選ぶまで押せない。変更のときは出さない */}
+        <div className={`space-y-3 ${changeMode ? "hidden" : ""}`}>
           <button
             onClick={() => selected && onStart(selected, true)}
             disabled={!canStart}
@@ -136,7 +153,7 @@ export default function WorkerSelectScreen({
           </button>
         </div>
 
-        {!canStart && workers !== null && workers.length > 0 && (
+        {!canStart && !changeMode && workers !== null && workers.length > 0 && (
           <p className="text-sm text-gray-500 text-center mt-4">
             担当者を選ぶと開始できます
           </p>

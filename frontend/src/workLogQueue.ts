@@ -269,7 +269,7 @@ export function startQueue(): void {
  * URLに残ると履歴やログに記録される。
  * 読めるのは作業者の名前一覧だけで、記録は一切返さない設計にしてある。
  */
-function getJsonp<T>(url: string, action: string, timeoutMs = 10000): Promise<T | null> {
+function getJsonp<T>(url: string, action: string, timeoutMs = 5000): Promise<T | null> {
   return new Promise((resolve) => {
     // 呼び出しごとに違う名前を使う。
     // 同じ名前を使い回すと、遅れて届いた古い応答が新しい呼び出しを上書きする。
@@ -281,9 +281,17 @@ function getJsonp<T>(url: string, action: string, timeoutMs = 10000): Promise<T 
     const cleanup = () => {
       if (finished) return;
       finished = true;
-      delete (window as unknown as Record<string, unknown>)[name];
       if (script.parentNode) script.parentNode.removeChild(script);
       clearTimeout(timer);
+
+      // 関数はすぐに消さない。
+      // 諦めた後に応答が届くと、参照エラーが出るため
+      // （通信が遅いときに実際に発生。2026-09-19）。
+      // 中身を空にしておき、少し待ってから消す。
+      (window as unknown as Record<string, unknown>)[name] = () => {};
+      setTimeout(() => {
+        delete (window as unknown as Record<string, unknown>)[name];
+      }, 60000);
     };
 
     // 応答が来ないまま終わる場合に備える。
@@ -332,14 +340,39 @@ function getJsonp<T>(url: string, action: string, timeoutMs = 10000): Promise<T 
  * 読めたら端末に控える。読めなければ前回の控えを返す。
  * 控えもなければ null（初回に通信できなかった場合のみ）。
  */
+/**
+ * 作業者の一覧を取り出す。
+ *
+ * 記録（時刻・伝票）は読み出さない。名前の一覧だけを読む例外
+ * （2台のiPadで同じ一覧を使うため。要求仕様 4-3(4)）。
+ *
+ * GAS の応答は断続的に失敗する（2026-09-19 に実測）。
+ * JSONP にしたことで頻度は下がったが、ゼロにはならない。
+ * そこで次の順に手を尽くす。
+ *   1. 読む
+ *   2. 失敗したら1度だけやり直す
+ *   3. それでも駄目なら前回の控えを使う
+ *
+ * 2 を入れたのは、初回は控えが無く、
+ * 失敗すると担当者を選べなくなるため。
+ */
 export async function fetchWorkers(): Promise<string[] | null> {
   const config = loadConfig();
   if (!config) return null;
 
-  const result = await getJsonp<{ ok: boolean; workers?: string[] }>(
+  let result = await getJsonp<{ ok: boolean; workers?: string[] }>(
     config.url,
     "workers.list"
   );
+
+  // 1度だけやり直す。すぐ再試行すると同じ理由で失敗しやすいので少し待つ。
+  if (!result || !result.ok) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    result = await getJsonp<{ ok: boolean; workers?: string[] }>(
+      config.url,
+      "workers.list"
+    );
+  }
 
   if (result && result.ok && result.workers) {
     saveWorkersCache(result.workers);
