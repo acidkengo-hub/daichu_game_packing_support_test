@@ -11,6 +11,19 @@ import { findSetDefinition } from "./setDefinitions";
 import { getSetImageUrl } from "./imageMapping";
 import { detectShop, isFlyerAlertEnabled, FLYER_ALERT_TEXT } from "./shopColors";
 import { initFontSize } from "./uiSettings";
+import WorkerSelectScreen from "./WorkerSelectScreen";
+import {
+  type WorkSession,
+  loadSession,
+  saveSession,
+  startSession,
+  enterPacking,
+  completeSlip,
+  cancelSlip,
+  endSession,
+  shouldAutoEnd,
+} from "./workLog";
+import { isConfigured, enqueue, startQueue } from "./workLogQueue";
 import {
   type WorkDay,
   type ShipmentSlot,
@@ -49,6 +62,7 @@ import QuestClearScreen, { type DefeatedRecord } from "./QuestClearScreen";
 
 type Phase =
   | "home"
+  | "workerSelect"  // 担当者を選んで作業開始（記録が有効なときだけ通る）
   | "picking"
   | "pickingSummary"
   | "packing"
@@ -132,6 +146,48 @@ export default function App() {
   // ============================================================
   /** レトロモードが有効か。localStorage から初期値を復元する */
   const [rpgMode, setRpgMode] = useState<boolean>(isRetroModeEnabled);
+
+  // ============================================================
+  // 作業記録
+  //
+  // 画面には一切表示しない（要求仕様 4-2(1)）。
+  // 記録が有効なのは、送信先が設定されていて、かつRPGモードでないときだけ。
+  // 未設定なら担当者選択を飛ばし、今までどおり作業できる（作業を止めない）。
+  // ============================================================
+
+  const [workSession, setWorkSession] = useState<WorkSession | null>(loadSession);
+
+  /** 担当者選択のあとに進む先を覚えておく */
+  const [pendingStart, setPendingStart] = useState<{
+    carrier: "takkyubin" | "nekopos";
+    startIdx?: number;
+  } | null>(null);
+
+  /** 前回この端末で選ばれた担当者。毎回選び直す手間を省く */
+  const [lastWorker, setLastWorker] = useState<string | null>(
+    () => localStorage.getItem("game-packing-last-worker")
+  );
+
+  /** 記録中の状態を変えるときは、必ず保存も行う（再読み込みで復帰するため） */
+  const updateSession = useCallback((next: WorkSession | null) => {
+    setWorkSession(next);
+    saveSession(next);
+  }, []);
+
+  // 前回の未送信分を送る仕組みを動かす（例外#15、#16）
+  useEffect(() => {
+    startQueue();
+  }, []);
+
+  // 開き直したときに、120分を過ぎていれば自動終了する（要求仕様 4-2(9)）
+  useEffect(() => {
+    if (!workSession) return;
+    if (!shouldAutoEnd(workSession)) return;
+
+    enqueue(endSession(workSession, "自動終了").event);
+    setWorkSession(null);
+    saveSession(null);
+  }, [workSession]);
   /** タイトル画面を表示中か。解除直後に1回だけ出す「幕開け」 */
   const [showQuestTitle, setShowQuestTitle] = useState(false);
   /** ロゴ連打のヒント表示（4回目以降に出る小さなドット） */
@@ -361,7 +417,29 @@ export default function App() {
     setNotice("");
   }, []);
 
+  /**
+   * 配送方法を選んだあとの処理。
+   *
+   * 記録が有効なら、ここで担当者選択を挟む（要求仕様 3章 After）。
+   * 開始を押さなければ作業に入れない構成にすることで、記録漏れを防ぐ。
+   */
   const handleCarrierSelect = useCallback((carrier: "takkyubin" | "nekopos", startIdx?: number) => {
+    // RPGモード中、または送信先が未設定のときは、今までどおりの流れにする
+    // （要求仕様 4-2(11)、未設定時は作業を止めない方針）
+    if (!isConfigured() || rpgMode) {
+      applyCarrierSelect(carrier, startIdx);
+      return;
+    }
+
+    setPendingStart({ carrier, startIdx });
+    setPhase("workerSelect");
+  }, [rpgMode]);
+
+  /**
+   * 実際に画面を切り替える。進捗の復元だけを行い、記録には関わらない。
+   * 担当者選択を経由する場合も、しない場合も、最後はここを通る。
+   */
+  const applyCarrierSelect = useCallback((carrier: "takkyubin" | "nekopos", startIdx?: number) => {
     // 選択した便・キャリアの保存済み進捗を復元する
     const session = workDay && activeSlot ? workDay[activeSlot] : null;
     setSelectedCarrier(carrier);
@@ -380,6 +458,34 @@ export default function App() {
       setPhase("picking");
     }
   }, [workDay, activeSlot]);
+
+  /**
+   * 担当者を選んで作業を開始した。
+   *
+   * ここで記録が始まる。押した時点が開始時刻になる（要求仕様 3章 After 3）。
+   */
+  const handleStartWork = useCallback((worker: string, fromPicking: boolean) => {
+    if (!pendingStart || !activeSlot) return;
+
+    const carrierLabel = pendingStart.carrier === "takkyubin" ? "宅急便" : "ネコポス";
+    const binLabel = activeSlot === "morning" ? "午前便" : "午後便";
+
+    const session = startSession({
+      bin: binLabel,
+      carrier: carrierLabel,
+      worker,
+      fromPicking,
+    });
+
+    updateSession(session);
+    setLastWorker(worker);
+    localStorage.setItem("game-packing-last-worker", worker);
+
+    // 「ピッキングから」なら startIdx なし、「梱包から」なら 0 を渡す。
+    // 既存の分岐（startIdx の有無）がそのまま対応している。
+    applyCarrierSelect(pendingStart.carrier, fromPicking ? undefined : 0);
+    setPendingStart(null);
+  }, [pendingStart, activeSlot, updateSession, applyCarrierSelect]);
 
   /** 中断位置から梱包を再開 */
   const handleResume = useCallback((slot: ShipmentSlot, carrier: "takkyubin" | "nekopos", index: number) => {
@@ -404,10 +510,17 @@ export default function App() {
     setPhase("pickingSummary");
   }, []);
 
-  const handleStartPacking = useCallback(() => {
+  /**
+   * ピッキングを終えて梱包へ進む。
+   * ここで伝票の時間の起点が決まる（要求仕様 4-2(5)）。
+   */
+  const handleStartPacking = useCallback((skipped = false) => {
+    if (workSession) {
+      updateSession(enterPacking(workSession, skipped));
+    }
     setShowPackingGuide(!hasSeenGuide("packing"));
     setPhase("packing");
-  }, []);
+  }, [workSession, updateSession]);
 
   const handlePackingSetToggle = useCallback((mgmtNo: string, compName: string) => {
     setPackingSetChecked((prev) => {
@@ -464,6 +577,23 @@ export default function App() {
       : [...packingDoneList, mgmtNo];
     setPackingDoneList(nextDone);
 
+    // 伝票1件の完了を記録する。
+    // 商品名はセット単位の名前（shortName || name）を使う。
+    // 内訳ではなくセット名を残すことで、
+    // 「PS2セットは時間がかかる」といった比較ができる（要求仕様 1章）。
+    let sessionAfterComplete = workSession;
+    if (workSession) {
+      const order = carrierData.orders.find((o) => o.mgmtNo === mgmtNo);
+      const items = order
+        ? order.products.map((p) => p.shortName || p.name)
+        : [];
+
+      const result = completeSlip(workSession, { orderId: mgmtNo, items });
+      enqueue(result.event);
+      sessionAfterComplete = result.session;
+      updateSession(result.session);
+    }
+
     // 次の未完了注文を探す（現在位置より後 → 見つからなければ先頭から）
     // ★並べ替え中は表示順（sortedOrders）を基準にする
     const doneSet = new Set(nextDone);
@@ -479,16 +609,30 @@ export default function App() {
     }
 
     if (nextIdx === -1) {
-      setPhase("packingSummary");  // 全件完了
+      // 全件完了。自動で担当終了にする（要求仕様 4-2(8)、例外#9）
+      if (sessionAfterComplete) {
+        enqueue(endSession(sessionAfterComplete, "全完了").event);
+        updateSession(null);
+      }
+      setPhase("packingSummary");
     } else {
       setCurrentPackingIdx(nextIdx);
     }
-  }, [carrierData, sortedOrders, packingDoneList, currentPackingIdx]);
+  }, [carrierData, sortedOrders, packingDoneList, currentPackingIdx, workSession, updateSession]);
 
   /** 完了記録を取り消して再編集可能にする */
   const handleUncompleteOrder = useCallback((mgmtNo: string) => {
     setPackingDoneList((prev) => prev.filter((no) => no !== mgmtNo));
-  }, []);
+
+    // 取り消しを記録する。元の行は消さず、印だけが変わる（要求仕様 4-2(6)）。
+    // 記録していない伝票（担当終了後の取り寄せ品など）なら、
+    // cancelSlip が null を返すので何も送られない。
+    if (workSession) {
+      const result = cancelSlip(workSession, mgmtNo);
+      enqueue(result.event);
+      updateSession(result.session);
+    }
+  }, [workSession, updateSession]);
 
   /** 便選択画面に戻る（データは保持） */
   const handleBackToHome = useCallback(() => {
@@ -555,6 +699,29 @@ export default function App() {
 
   if (phase === "settings") {
     return <SettingsScreen onClose={() => setPhase("home")} />;
+  }
+
+  // 担当者を選んで作業開始（記録が有効なときだけ通る）
+  if (phase === "workerSelect" && pendingStart && activeSlot) {
+    const carrierInfo =
+      pendingStart.carrier === "takkyubin"
+        ? parsedData?.takkyubin
+        : parsedData?.nekopos;
+
+    return (
+      <WorkerSelectScreen
+        binLabel={`${SLOT_ICONS[activeSlot]} ${SLOT_LABELS[activeSlot]}`}
+        carrierLabel={carrierInfo?.label ?? ""}
+        orderCount={carrierInfo?.orders.length ?? 0}
+        pickingCount={carrierInfo?.pickingItems.length ?? 0}
+        lastWorker={lastWorker}
+        onStart={handleStartWork}
+        onBack={() => {
+          setPendingStart(null);
+          setPhase("home");
+        }}
+      />
+    );
   }
 
   // ============================================================
@@ -1057,7 +1224,7 @@ export default function App() {
           </div>
 
           <button
-            onClick={handleStartPacking}
+            onClick={() => handleStartPacking(false)}
             className="w-full bg-blue-600 hover:bg-blue-500 text-white py-4 
                        rounded-xl text-lg font-bold min-h-[56px]"
           >

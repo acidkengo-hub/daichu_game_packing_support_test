@@ -32,6 +32,16 @@ const QUEUE_KEY = "game-packing-worklog-queue";
 /** 送信先の設定を置く場所。登録キーを含むため、コードには書かない（§4-3） */
 const CONFIG_KEY = "game-packing-worklog-config";
 
+/**
+ * 作業者の一覧を端末に控えておく場所。
+ *
+ * GAS の応答は、ページ内の fetch から読むと不定期に404になる
+ * （2026-09-16 に実測。ブラウザで直接開く、curl で叩く、では成功する）。
+ * 読めなかったときに作業が止まらないよう、前回読めた一覧を使う。
+ * 要求仕様 8章「通信が切れても梱包作業は続けられる」に沿う。
+ */
+const WORKERS_CACHE_KEY = "game-packing-workers-cache";
+
 /** 溜めてから送るまでの待ち時間（ミリ秒） */
 const FLUSH_DELAY_MS = 3000;
 
@@ -243,37 +253,68 @@ export function startQueue(): void {
 // ===== 作業者の一覧 =====
 
 /**
- * GET で読み取る。
+ * JSONP で読み取る。
  *
- * 【なぜ GET なのか】
- * POST の応答はブラウザから読めない。GAS が応答を転送する
- * 使い捨てURLが、POST 経由だと不定期に404を返すため（2026-09-14 に実測）。
- * GET 経由なら安定して読める。
+ * 【なぜ fetch ではなく script タグなのか】
+ * GAS は応答を script.googleusercontent.com へ転送する。
+ * ページ内の fetch はこの転送先で 404 になる。
+ * fetch の credentials は既定で same-origin のため、
+ * 別ドメインである転送先へ Cookie が送られないことが原因と見られる
+ * （2026-09-16 に調査。アドレスバーから開く、curl で叩く場合は成功する）。
+ *
+ * script タグによる読み込みは、アドレスバーと同じ扱いで転送に追従するため、
+ * この制約を受けない。
  *
  * 【なぜ登録キーを付けないのか】
- * GET でキーを渡すとURLに残り、履歴やログに記録される。
+ * URLに残ると履歴やログに記録される。
  * 読めるのは作業者の名前一覧だけで、記録は一切返さない設計にしてある。
  */
-async function getJson<T>(url: string, action: string): Promise<T | null> {
-  try {
-    const target = `${url}?action=${encodeURIComponent(action)}`;
-    const response = await fetch(target, { method: "GET" });
+function getJsonp<T>(url: string, action: string, timeoutMs = 10000): Promise<T | null> {
+  return new Promise((resolve) => {
+    // 呼び出しごとに違う名前を使う。
+    // 同じ名前を使い回すと、遅れて届いた古い応答が新しい呼び出しを上書きする。
+    const name = `__workLogCb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-    if (!response.ok) {
-      throw new Error(
-        `読み取れませんでした（HTTP ${response.status}）\n` +
-          "　→ デプロイのアクセス権限が「全員」か確認してください"
+    const script = document.createElement("script");
+    let finished = false;
+
+    const cleanup = () => {
+      if (finished) return;
+      finished = true;
+      delete (window as unknown as Record<string, unknown>)[name];
+      if (script.parentNode) script.parentNode.removeChild(script);
+      clearTimeout(timer);
+    };
+
+    // 応答が来ないまま終わる場合に備える。
+    // 後始末をしないと、script タグと関数が残り続ける。
+    const timer = setTimeout(() => {
+      console.warn(
+        `[workLogQueue] ${action} の応答がありませんでした（${timeoutMs / 1000}秒）\n` +
+          "　→ 通信の状態を確認してください"
       );
-    }
-    return (await response.json()) as T;
-  } catch (e) {
-    console.error(
-      `[workLogQueue] ${action} の取得に失敗しました\n` +
-        "　→ 設定画面のURLと、通信の状態を確認してください",
-      e
-    );
-    return null;
-  }
+      cleanup();
+      resolve(null);
+    }, timeoutMs);
+
+    (window as unknown as Record<string, unknown>)[name] = (data: T) => {
+      cleanup();
+      resolve(data);
+    };
+
+    script.onerror = () => {
+      console.error(
+        `[workLogQueue] ${action} を読み込めませんでした\n` +
+          "　→ 設定画面のURLと、通信の状態を確認してください"
+      );
+      cleanup();
+      resolve(null);
+    };
+
+    script.src =
+      `${url}?action=${encodeURIComponent(action)}&callback=${name}`;
+    document.head.appendChild(script);
+  });
 }
 
 /**
@@ -282,16 +323,60 @@ async function getJson<T>(url: string, action: string): Promise<T | null> {
  * 記録（時刻・伝票）は読み出さない。名前の一覧だけを読む例外
  * （2台のiPadで同じ一覧を使うため。要求仕様 4-3(4)）。
  */
+/**
+ * 作業者の一覧を取り出す。
+ *
+ * 記録（時刻・伝票）は読み出さない。名前の一覧だけを読む例外
+ * （2台のiPadで同じ一覧を使うため。要求仕様 4-3(4)）。
+ *
+ * 読めたら端末に控える。読めなければ前回の控えを返す。
+ * 控えもなければ null（初回に通信できなかった場合のみ）。
+ */
 export async function fetchWorkers(): Promise<string[] | null> {
   const config = loadConfig();
   if (!config) return null;
 
-  const result = await getJson<{ ok: boolean; workers?: string[] }>(
+  const result = await getJsonp<{ ok: boolean; workers?: string[] }>(
     config.url,
     "workers.list"
   );
-  if (!result || !result.ok) return null;
-  return result.workers ?? [];
+
+  if (result && result.ok && result.workers) {
+    saveWorkersCache(result.workers);
+    return result.workers;
+  }
+
+  // 読めなかった。前回の控えで代替する。
+  const cached = loadWorkersCache();
+  if (cached) {
+    console.warn(
+      `[workLogQueue] 担当者の一覧を読めなかったため、前回の一覧を使います（${cached.length}名）`
+    );
+    return cached;
+  }
+
+  return null;
+}
+
+/** 端末に控えた作業者の一覧を読む */
+function loadWorkersCache(): string[] | null {
+  try {
+    const raw = localStorage.getItem(WORKERS_CACHE_KEY);
+    if (!raw) return null;
+    const list = JSON.parse(raw) as string[];
+    return Array.isArray(list) && list.length > 0 ? list : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 作業者の一覧を端末に控える */
+function saveWorkersCache(workers: string[]): void {
+  try {
+    localStorage.setItem(WORKERS_CACHE_KEY, JSON.stringify(workers));
+  } catch (e) {
+    console.warn("[workLogQueue] 担当者の一覧を控えられませんでした", e);
+  }
 }
 
 /**
@@ -338,7 +423,19 @@ async function changeWorkers(
   // GAS の処理が終わる前に読むと、変更前の一覧が返ってくる。
   await new Promise((resolve) => setTimeout(resolve, 1500));
 
-  return fetchWorkers();
+  // 取り直しに失敗すると古い控えが返り、追加・削除が反映されていないように見える。
+  // その場合は控えを捨ててから読み直す。
+  const before = loadWorkersCache();
+  const after = await fetchWorkers();
+
+  if (after && before && after.join() === before.join()) {
+    console.warn(
+      "[workLogQueue] 一覧が変わっていません。" +
+        "反映に時間がかかっているか、登録キーが違う可能性があります"
+    );
+  }
+
+  return after;
 }
 
 /**
@@ -351,7 +448,7 @@ async function changeWorkers(
 export async function testConnection(
   config: QueueConfig
 ): Promise<{ ok: boolean; message: string }> {
-  const result = await getJson<{ ok: boolean; workers?: string[] }>(
+  const result = await getJsonp<{ ok: boolean; workers?: string[] }>(
     config.url,
     "workers.list"
   );

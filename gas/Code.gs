@@ -113,21 +113,45 @@ var TEXT_COLUMNS = {
  * 書き込みは引き続きキーで守るため、例外#20 は維持される。
  */
 function doGet(e) {
-  var action = (e && e.parameter && e.parameter.action) || "";
+  var params = (e && e.parameter) || {};
+  var action = params.action || "";
+  var callback = params.callback || "";
+
+  var result;
 
   if (action === "workers.list") {
-    return textJson({ ok: true, workers: listWorkers() });
+    result = { ok: true, workers: listWorkers() };
+  } else {
+    // 既定の応答。デプロイされている版を外から確かめるための印。
+    result = {
+      ok: true,
+      message: "梱包作業記録API は動作しています",
+      build: "2026-09-16-jsonp",
+      hasCellText: (typeof cellText === "function"),
+    };
   }
 
-  // 既定の応答。デプロイされている版を外から確かめるための印。
-  // エディタ上のコードとデプロイ済みのコードは別物になりうるため、
-  // 「今このURLで動いているのはどの版か」を答えられるようにしておく。
-  return textJson({
-    ok: true,
-    message: "梱包作業記録API は動作しています",
-    build: "2026-09-14-get-workers",
-    hasCellText: (typeof cellText === "function"),
-  });
+  // callback が指定されていれば JSONP で返す。
+  //
+  // 【なぜ JSONP なのか】
+  // GAS は応答を script.googleusercontent.com へ転送する。
+  // ページ内の fetch はこの転送先で 404 になる。
+  // fetch の credentials は既定で same-origin のため、
+  // 別ドメインである転送先へ Cookie が送られないことが原因と見られる
+  // （2026-09-16 に調査。アドレスバーから開く、curl で叩く場合は成功する）。
+  //
+  // <script> タグによる読み込みは、アドレスバーと同じ扱いで転送に追従するため、
+  // この制約を受けない。
+  //
+  // ここで返すのは作業者の名前一覧だけで、
+  // 時刻・伝票・管理番号といった記録は一切返さない。
+  if (callback) {
+    return ContentService
+      .createTextOutput(callback + "(" + JSON.stringify(result) + ")")
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+
+  return textJson(result);
 }
 
 /**

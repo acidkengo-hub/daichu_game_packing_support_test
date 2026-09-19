@@ -47,6 +47,8 @@ const EMPTY_DEF: SetDefinition = {
 // コンポーネント
 // ============================================================
 
+import WorkLogSettings from "./WorkLogSettings";
+
 export default function SettingsScreen({ onClose }: Props) {
   const [definitions, setDefinitions] = useState<SetDefinition[]>(getSetDefinitions);
   const [searchQuery, setSearchQuery] = useState("");
@@ -389,6 +391,9 @@ export default function SettingsScreen({ onClose }: Props) {
             </span>
           </button>
         </div>
+
+        {/* 作業記録（担当者・送信先）。既存項目の下に置き、位置をずらさない */}
+        <WorkLogSettings />
 
         <p className="text-sm text-gray-400 mb-4">
           登録数: {definitions.length}件 ／ 同梱物の正規化名がピッキング集約のキーになります
