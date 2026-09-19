@@ -859,6 +859,21 @@ export default function App() {
         </header>
 
         <div className="flex-1 flex flex-col items-center p-6 max-w-[780px] mx-auto w-full">
+          {/* 送信先が未設定のとき。記録が残らないことに気づけるようにする。
+              ホーム画面にだけ出す。作業中の画面に出すと、
+              伝票ごとに目に入って「計測されている」意識を生むため（要求仕様 4-2(1)）。
+              RPGモード中は記録しないのが正しい状態なので出さない（要求仕様 4-2(11)）。 */}
+          {!isConfigured() && !rpgMode && (
+            <div className="w-full bg-amber-950/40 border border-amber-800 rounded-lg px-3 py-2 mb-4">
+              <p className="text-sm text-amber-300">
+                ⚠️ 作業記録の送信先が未設定です
+              </p>
+              <p className="text-xs text-amber-500/80 mt-0.5">
+                設定画面から登録してください
+              </p>
+            </div>
+          )}
+
           {/* CSVアップロード（常時表示） */}
           <div className="w-full mb-6">
             <label className="block w-full cursor-pointer">
