@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchWorkers } from "./workLogQueue";
+import { fetchWorkers, cachedWorkers } from "./workLogQueue";
 
 /**
  * 担当者を選んで作業を開始する画面
@@ -42,12 +42,17 @@ export default function WorkerSelectScreen({
   onStart,
   onBack,
 }: Props) {
-  const [workers, setWorkers] = useState<string[] | null>(null);
+  // 控えがあれば、それを最初から表示する。
+  // 読み込みを待たせないうえ、サーバーからの取得に失敗しても
+  // 担当者を選べる（2026-09-19 に実測。短時間に繰り返すと失敗しやすい）。
+  const [workers, setWorkers] = useState<string[] | null>(() => cachedWorkers());
   const [selected, setSelected] = useState<string | null>(lastWorker);
 
   useEffect(() => {
+    // 裏で最新の一覧を取りに行く。
+    // 失敗しても控えが表示されたままなので、作業は止まらない。
     void fetchWorkers().then((list) => {
-      setWorkers(list ?? []);
+      if (list) setWorkers(list);
 
       // 前回の担当者が一覧から消えていたら、選択を外す。
       // 消えた人の名前で記録が残るのを防ぐ。

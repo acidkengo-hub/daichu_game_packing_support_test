@@ -391,7 +391,18 @@ export async function fetchWorkers(): Promise<string[] | null> {
   return null;
 }
 
-/** 端末に控えた作業者の一覧を読む */
+/**
+ * 端末に控えた作業者の一覧を読む。
+ *
+ * 画面はまずこれを表示し、裏で fetchWorkers を呼んで更新する。
+ * 毎回サーバーから読むと、短時間に繰り返したとき失敗しやすい
+ * （2026-09-19 に実測。5回中2回が5秒以内に返らなかった）。
+ * 作業者の顔ぶれは1日に何度も変わらないので、控えで十分。
+ */
+export function cachedWorkers(): string[] | null {
+  return loadWorkersCache();
+}
+
 function loadWorkersCache(): string[] | null {
   try {
     const raw = localStorage.getItem(WORKERS_CACHE_KEY);
@@ -495,6 +506,13 @@ export async function testConnection(
 
   if (!result.ok) {
     return { ok: false, message: "応答が不正です。URLを確認してください" };
+  }
+
+  // 接続を確認できたら、この機会に控えを作っておく。
+  // iPad のセットアップ時に必ず通る経路なので、
+  // 以降は読み取りに失敗しても担当者を選べる。
+  if (result.workers && result.workers.length > 0) {
+    saveWorkersCache(result.workers);
   }
 
   return {
