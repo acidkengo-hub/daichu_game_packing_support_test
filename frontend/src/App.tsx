@@ -228,15 +228,37 @@ export default function App() {
     startQueue();
   }, []);
 
-  // 開き直したときに、120分を過ぎていれば自動終了する（要求仕様 4-2(9)）
-  useEffect(() => {
-    if (!workSession) return;
-    if (!shouldAutoEnd(workSession)) return;
+  /**
+   * 120分の自動終了（要求仕様 4-2(9)）。
+   *
+   * 終了したら true を返す。呼び出し側は、その場合
+   * 以降の記録を行わない。
+   *
+   * 自動終了したらホーム画面へ戻す。
+   * 梱包画面のままだと、作業者は何も気づかず作業を続け、
+   * その分が記録されない。
+   * 120分操作が途絶えた後なので、そもそも作業者はその場にいない。
+   * 戻ってきて画面を見たらホームだった、という形になり、
+   * 再開の操作を自然に促せる（要求仕様 例外#7）。
+   */
+  const endIfTimedOut = useCallback((session: WorkSession | null): boolean => {
+    if (!session) return false;
+    if (!shouldAutoEnd(session)) return false;
 
-    enqueue(endSession(workSession, "自動終了").event);
+    enqueue(endSession(session, "自動終了").event);
     setWorkSession(null);
     saveSession(null);
-  }, [workSession]);
+    setSelectedCarrier(null);
+    setActiveSlot(null);
+    setPhase("home");
+    return true;
+  }, []);
+
+  // ツールを開いたとき、または記録中の状態が変わったときに判定する。
+  // スリープや閉じた後の復帰がここに当たる（要求仕様 4-2(12)）。
+  useEffect(() => {
+    endIfTimedOut(workSession);
+  }, [workSession, endIfTimedOut]);
   /** タイトル画面を表示中か。解除直後に1回だけ出す「幕開け」 */
   const [showQuestTitle, setShowQuestTitle] = useState(false);
   /** ロゴ連打のヒント表示（4回目以降に出る小さなドット） */
@@ -650,6 +672,11 @@ export default function App() {
 
   const handleCompleteOrder = useCallback((mgmtNo: string) => {
     if (!carrierData) return;
+
+    // 120分空いていたら、この完了は記録せずに終了する（要求仕様 例外#7）。
+    // 画面を開いたまま離席した場合がここに当たる。
+    if (endIfTimedOut(workSession)) return;
+
     const nextDone = packingDoneList.includes(mgmtNo)
       ? packingDoneList
       : [...packingDoneList, mgmtNo];
@@ -696,7 +723,7 @@ export default function App() {
     } else {
       setCurrentPackingIdx(nextIdx);
     }
-  }, [carrierData, sortedOrders, packingDoneList, currentPackingIdx, workSession, updateSession]);
+  }, [carrierData, sortedOrders, packingDoneList, currentPackingIdx, workSession, updateSession, endIfTimedOut]);
 
   /** 完了記録を取り消して再編集可能にする */
   const handleUncompleteOrder = useCallback((mgmtNo: string) => {
