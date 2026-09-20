@@ -32,6 +32,13 @@ jobs:
 
       - name: Build
         working-directory: frontend
+        # 公開URLのパスをリポジトリ名から決める。
+        # 本番とテスト用でリポジトリ名が違うため、固定値にすると
+        # どちらかで動かなくなる。
+        # GitHub Pages は https://<user>.github.io/<リポジトリ名>/ で公開されるので、
+        # リポジトリ名をそのまま base に使えば両方で正しく動く。
+        env:
+          VITE_BASE: /${{ github.event.repository.name }}/
         run: npm run build
 
       - name: Setup Pages
