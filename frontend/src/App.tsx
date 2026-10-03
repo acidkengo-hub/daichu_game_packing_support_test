@@ -489,26 +489,11 @@ export default function App() {
   }, []);
 
   /**
-   * 配送方法を選んだあとの処理。
-   *
-   * 記録が有効なら、ここで担当者選択を挟む（要求仕様 3章 After）。
-   * 開始を押さなければ作業に入れない構成にすることで、記録漏れを防ぐ。
-   */
-  const handleCarrierSelect = useCallback((carrier: "takkyubin" | "nekopos", startIdx?: number) => {
-    // RPGモード中、または送信先が未設定のときは、今までどおりの流れにする
-    // （要求仕様 4-2(11)、未設定時は作業を止めない方針）
-    if (!isConfigured() || rpgMode) {
-      applyCarrierSelect(carrier, startIdx);
-      return;
-    }
-
-    setPendingStart({ carrier, startIdx });
-    setPhase("workerSelect");
-  }, [rpgMode]);
-
-  /**
    * 実際に画面を切り替える。進捗の復元だけを行い、記録には関わらない。
    * 担当者選択を経由する場合も、しない場合も、最後はここを通る。
+   *
+   * 呼び出し側より先に定義する。後に定義すると、呼び出し側の依存配列に
+   * 入れられず、古い workDay・activeSlot を掴んだ関数が使われ続けるため。
    */
   const applyCarrierSelect = useCallback((carrier: "takkyubin" | "nekopos", startIdx?: number) => {
     // 選択した便・キャリアの保存済み進捗を復元する
@@ -530,6 +515,76 @@ export default function App() {
     }
   }, [workDay, activeSlot]);
 
+  /** 実際に梱包画面へ戻す。進捗の復元だけを行う */
+  const applyResume = useCallback((slot: ShipmentSlot, carrier: "takkyubin" | "nekopos", index: number) => {
+    const session = workDay?.[slot] ?? null;
+    setSelectedCarrier(carrier);
+    setPickingChecked(session?.pickingChecked?.[carrier] ?? {});
+    setPackingSetChecked(session?.packingSetChecked ?? {});
+    setPackingDoneList(session?.packingDone?.[carrier] ?? []);
+    setPackingSortMode(session?.packingSortMode ?? "default");
+    setCurrentPackingIdx(index);
+    setShowPackingGuide(!hasSeenGuide("packing"));
+    setNotice("");
+    setPhase("packing");
+  }, [workDay]);
+
+  /**
+   * 記録中の作業を、新しい作業に入る前に整理する。
+   *
+   * "continue" … 同じ便・配送方法の記録が続いている。担当者選択を飛ばして再開する
+   * "fresh"    … 記録なし、または前の記録を閉じた。担当者選択へ進む
+   *
+   * 別の便・配送方法を選んだ時点で、前の作業は終わっている。
+   * 閉じずに新しい記録を始めると、前の作業記録の「終わり方」が空のまま残る
+   * （2026-10 に発見）。終了時刻は最後の完了時刻になる（endSession の仕様）。
+   */
+  const settleActiveSession = useCallback((bin: string, carrierLabel: string): "continue" | "fresh" => {
+    if (!workSession) return "fresh";
+
+    // 120分を過ぎていれば、押し忘れと同じ扱いで閉じる
+    if (shouldAutoEnd(workSession)) {
+      enqueue(endSession(workSession, "自動終了").event);
+      updateSession(null);
+      return "fresh";
+    }
+
+    if (workSession.bin === bin && workSession.carrier === carrierLabel) {
+      return "continue";
+    }
+
+    enqueue(endSession(workSession, "担当終了").event);
+    updateSession(null);
+    return "fresh";
+  }, [workSession, updateSession]);
+
+  /**
+   * 配送方法を選んだあとの処理。
+   *
+   * 記録が有効なら、ここで担当者選択を挟む（要求仕様 3章 After）。
+   * 開始を押さなければ作業に入れない構成にすることで、記録漏れを防ぐ。
+   * ただし同じ便・配送方法の記録が続いているなら、選び直させずに再開する。
+   */
+  const handleCarrierSelect = useCallback((carrier: "takkyubin" | "nekopos", startIdx?: number) => {
+    // RPGモード中、または送信先が未設定のときは、今までどおりの流れにする
+    // （要求仕様 4-2(11)、未設定時は作業を止めない方針）
+    if (!isConfigured() || rpgMode || !activeSlot) {
+      applyCarrierSelect(carrier, startIdx);
+      return;
+    }
+
+    const binLabel = activeSlot === "morning" ? "午前便" : "午後便";
+    const carrierLabel = carrier === "takkyubin" ? "宅急便" : "ネコポス";
+
+    if (settleActiveSession(binLabel, carrierLabel) === "continue") {
+      applyCarrierSelect(carrier, startIdx);
+      return;
+    }
+
+    setPendingStart({ carrier, startIdx });
+    setPhase("workerSelect");
+  }, [rpgMode, activeSlot, applyCarrierSelect, settleActiveSession]);
+
   /**
    * 担当者を選んで作業を開始した。
    *
@@ -537,6 +592,12 @@ export default function App() {
    */
   const handleStartWork = useCallback((worker: string, fromPicking: boolean) => {
     if (!pendingStart || !activeSlot) return;
+
+    // 念のための保険。ここに来る前に settleActiveSession で閉じているはずだが、
+    // 残っていれば閉じてから始める。上書きすると前の記録が閉じられない。
+    if (workSession) {
+      enqueue(endSession(workSession, "担当終了").event);
+    }
 
     const carrierLabel = pendingStart.carrier === "takkyubin" ? "宅急便" : "ネコポス";
     const binLabel = activeSlot === "morning" ? "午前便" : "午後便";
@@ -552,20 +613,25 @@ export default function App() {
     setLastWorker(worker);
     localStorage.setItem("game-packing-last-worker", worker);
 
-    // 「ピッキングから」なら startIdx なし、「梱包から」なら 0 を渡す。
-    // 既存の分岐（startIdx の有無）がそのまま対応している。
-    applyCarrierSelect(pendingStart.carrier, fromPicking ? undefined : 0);
+    // 「ピッキングから」なら startIdx なし（ピッキング画面へ）。
+    // 「梱包から」なら、中断位置からの再開ならその位置、
+    // そうでなければ保存済みの位置から始める。
+    // 以前は常に 0 を渡しており、再開しても1件目に戻っていた。
+    const packingStart =
+      pendingStart.startIdx ??
+      workDay?.[activeSlot]?.packingIdx?.[pendingStart.carrier] ??
+      0;
+    applyCarrierSelect(pendingStart.carrier, fromPicking ? undefined : packingStart);
     setPendingStart(null);
-  }, [pendingStart, activeSlot, updateSession, applyCarrierSelect]);
+  }, [pendingStart, activeSlot, workDay, workSession, updateSession, applyCarrierSelect]);
 
-  /** 中断位置から梱包を再開 */
   /**
    * 中断位置から梱包を再開する。
    *
    * 記録が有効なら、ここでも担当者選択を挟む。
    * 途中で退勤して次の人に iPad を渡す場合があり、
-   * 再開時こそ担当者の確認が要る（要求仕様 3章 Before 5）。
-   * ここを素通りさせると、記録されないまま作業が進む。
+   * 担当終了の後の再開こそ担当者の確認が要る（要求仕様 3章 Before 5）。
+   * ただし同じ便・配送方法の記録が続いているなら、そのまま再開する。
    */
   const handleResume = useCallback((slot: ShipmentSlot, carrier: "takkyubin" | "nekopos", index: number) => {
     setActiveSlot(slot);
@@ -575,23 +641,17 @@ export default function App() {
       return;
     }
 
+    const binLabel = slot === "morning" ? "午前便" : "午後便";
+    const carrierLabel = carrier === "takkyubin" ? "宅急便" : "ネコポス";
+
+    if (settleActiveSession(binLabel, carrierLabel) === "continue") {
+      applyResume(slot, carrier, index);
+      return;
+    }
+
     setPendingStart({ carrier, startIdx: index });
     setPhase("workerSelect");
-  }, [rpgMode]);
-
-  /** 実際に梱包画面へ戻す。進捗の復元だけを行う */
-  const applyResume = useCallback((slot: ShipmentSlot, carrier: "takkyubin" | "nekopos", index: number) => {
-    const session = workDay?.[slot] ?? null;
-    setSelectedCarrier(carrier);
-    setPickingChecked(session?.pickingChecked?.[carrier] ?? {});
-    setPackingSetChecked(session?.packingSetChecked ?? {});
-    setPackingDoneList(session?.packingDone?.[carrier] ?? []);
-    setPackingSortMode(session?.packingSortMode ?? "default");
-    setCurrentPackingIdx(index);
-    setShowPackingGuide(!hasSeenGuide("packing"));
-    setNotice("");
-    setPhase("packing");
-  }, [workDay]);
+  }, [rpgMode, applyResume, settleActiveSession]);
 
   const handlePickingToggle = useCallback((itemName: string) => {
     setPickingChecked((prev) => ({ ...prev, [itemName]: !prev[itemName] }));
