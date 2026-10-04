@@ -65,10 +65,16 @@ var HEADER_SLIP = [
   "所要時間(秒)",
   "取り消し",
   "受信ID",
+  // 2026-10 追加。既存の列の位置を変えないよう、必ず末尾に足す。
+  // 閲覧ページは列の位置で読むため、途中に挟むと読み取りがずれる。
+  "注文番号",
+  "商品コード",
 ];
 var COL_SLIP_ORDER = 4;
 var COL_SLIP_CANCEL = 9;
 var COL_SLIP_ID = 10;
+var COL_SLIP_SHOP_ORDER = 11;  // ショップの注文番号（楽天・Yahoo!など）。クレーム時の検索に使う
+var COL_SLIP_CODE = 12;        // 商品コード。商品ごとの集計に使う
 
 /** ピッキングの強さ。大きいほど優先して残す（あり ＞ スキップ ＞ なし） */
 var PICKING_RANK = { "なし": 0, "スキップ": 1, "あり": 2 };
@@ -86,7 +92,8 @@ var PICKING_RANK = { "なし": 0, "スキップ": 1, "あり": 2 };
  */
 var TEXT_COLUMNS = {
   "作業記録": [COL_WORK_DATE, COL_WORK_START, COL_WORK_END],
-  "伝票": [1, COL_SLIP_ORDER, 7],  // 日付, 管理番号, 完了時刻
+  // 日付, 管理番号, 完了時刻, 注文番号, 商品コード
+  "伝票": [1, COL_SLIP_ORDER, 7, COL_SLIP_SHOP_ORDER, COL_SLIP_CODE],
 };
 
 // ===== 入口 =====
@@ -126,7 +133,7 @@ function doGet(e) {
     result = {
       ok: true,
       message: "梱包作業記録API は動作しています",
-      build: "2026-09-16-jsonp",
+      build: "2026-10-shop-order",
       hasCellText: (typeof cellText === "function"),
     };
   }
@@ -308,6 +315,9 @@ function writeSlip(ev) {
 
   var sheet = monthlySheet("伝票", ev.date, HEADER_SLIP);
   var items = (ev.items && ev.items.length) ? ev.items : [""];
+  // 商品コードは items と同じ並び。古いツールからの送信には無いので空にする。
+  var codes = (ev.codes && ev.codes.length) ? ev.codes : [];
+  var shopOrderNo = ev.shopOrderNo || "";
   var doneTime = formatTime(ev.doneAt);
   var rows = [];
 
@@ -327,6 +337,10 @@ function writeSlip(ev) {
       // 受信IDは取り消しの印を付けるときに行を探す手がかり。
       // 同梱で複数行になっても同じIDを入れる。
       ev.id,
+      // 注文番号は同梱の全行に入れる。
+      // 注文番号で検索したとき、その伝票の商品がすべて出るようにするため。
+      shopOrderNo,
+      codes[i] || "",
     ]);
   }
 
@@ -613,8 +627,33 @@ function monthlySheet(prefix, dateStr, header) {
     for (var c = 0; c < cols.length; c++) {
       sheet.getRange(1, cols[c], sheet.getMaxRows(), 1).setNumberFormat("@");
     }
+  } else {
+    ensureHeader(sheet, header, prefix);
   }
   return sheet;
+}
+
+/**
+ * 既存のシートに、後から足した列の見出しと書式を補う。
+ *
+ * 見出しはシートを新しく作るときにしか書かないため、
+ * 列を足す前に作られた月のシートには、新しい列の見出しが無い。
+ * 1行目の右端が空なら、見出しを書き、書式なしテキストに固定する。
+ * すでにそろっていれば何もしない（読み取り1回だけで済む）。
+ */
+function ensureHeader(sheet, header, prefix) {
+  var current = sheet.getRange(1, 1, 1, header.length).getValues()[0];
+  if (current[header.length - 1] === header[header.length - 1]) return;
+
+  var textCols = TEXT_COLUMNS[prefix] || [];
+  for (var i = 0; i < header.length; i++) {
+    if (current[i] === "" || current[i] === null) {
+      sheet.getRange(1, i + 1).setValue(header[i]).setFontWeight("bold");
+      if (textCols.indexOf(i + 1) >= 0) {
+        sheet.getRange(1, i + 1, sheet.getMaxRows(), 1).setNumberFormat("@");
+      }
+    }
+  }
 }
 
 // ===== 受信IDの控え（二重記録を防ぐ） =====

@@ -752,8 +752,17 @@ export default function App() {
       const items = order
         ? order.products.map((p) => p.shortName || p.name)
         : [];
+      // 商品コードは items と同じ並び。商品ごとの集計に使う。
+      const codes = order ? order.products.map((p) => p.code) : [];
+      // 改修前に読み込んで保存された注文には shopOrderNo が無いため、空で受ける。
+      const shopOrderNo = order?.shopOrderNo ?? "";
 
-      const result = completeSlip(workSession, { orderId: mgmtNo, items });
+      const result = completeSlip(workSession, {
+        orderId: mgmtNo,
+        items,
+        codes,
+        shopOrderNo,
+      });
       enqueue(result.event);
       sessionAfterComplete = result.session;
       updateSession(result.session);

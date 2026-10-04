@@ -44,6 +44,13 @@ export type Order = {
   recipientAddr: string;   // 届け先住所（結合済み）
   recipientTel: string;    // 届け先TEL (col 8)
   deliveryDate: string;    // 配送希望日 (col 11)
+  /**
+   * ショップの注文番号（楽天・Yahoo!・Amazonなど）。
+   * CSV定義の末尾に足した列で、位置ではなく見出しの名前「注文番号」で探す。
+   * 古い定義のCSVでは列が無く、空文字になる。
+   * 作業記録に残し、クレーム時の検索に使う（2026-10 追加）。
+   */
+  shopOrderNo: string;
   products: Product[];
   totalItems: number;
 };
@@ -437,6 +444,18 @@ export function parseCSV(file: File): Promise<ParsedData> {
           throw new Error("[parsers] CSVにデータ行がありません（ヘッダのみ）。");
         }
 
+        // 注文番号の列は、位置ではなく見出しの名前で探す。
+        // CSV定義の末尾に後から足した列のため、今後さらに列を足しても
+        // 位置がずれないようにする。見つからなければ -1 で、
+        // getField が空文字を返す（古い定義のCSVでも梱包作業は止まらない）。
+        const shopOrderCol = rows[0].findIndex((h) => (h ?? "").trim() === "注文番号");
+        if (shopOrderCol < 0) {
+          console.warn(
+            "[parsers] 「注文番号」の列が見つかりません。作業記録の注文番号は空欄になります\n" +
+              "　→ CROSS MALL のCSV定義の末尾に「注文番号」があるか確認してください"
+          );
+        }
+
         // ヘッダ行をスキップ（最初の行）
         const dataRows = rows.slice(1);
 
@@ -478,6 +497,7 @@ export function parseCSV(file: File): Promise<ParsedData> {
                 recipientAddr: addr,
                 recipientTel: getField(row, COL.TEL),
                 deliveryDate: getField(row, COL.DELIVERY_DATE),
+                shopOrderNo: getField(row, shopOrderCol),
               },
               products: [product],
             });
@@ -549,6 +569,7 @@ export function parseCSV(file: File): Promise<ParsedData> {
               recipientAddr: order.recipientAddr ?? "",
               recipientTel: order.recipientTel ?? "",
               deliveryDate: order.deliveryDate ?? "",
+              shopOrderNo: order.shopOrderNo ?? "",
               products: finalProducts,
               totalItems: finalProducts.reduce((sum, p) => sum + p.qty, 0),
             };

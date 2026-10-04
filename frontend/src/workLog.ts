@@ -232,6 +232,10 @@ export interface SlipResult {
     worker: string;
     orderId: string;
     items: string[];
+    /** 商品コード。items と同じ並び。商品ごとの集計に使う */
+    codes: string[];
+    /** ショップの注文番号（楽天・Yahoo!など）。クレーム時の検索に使う */
+    shopOrderNo: string;
     doneAt: string;
     startedAt: string;
     durationSec: number;
@@ -248,7 +252,14 @@ export interface SlipResult {
  */
 export function completeSlip(
   session: WorkSession,
-  params: { orderId: string; items: string[]; now?: number }
+  params: {
+    orderId: string;
+    items: string[];
+    /** 省略時は空。古い定義のCSVでは注文番号が取れないため */
+    codes?: string[];
+    shopOrderNo?: string;
+    now?: number;
+  }
 ): SlipResult {
   const now = params.now ?? Date.now();
 
@@ -319,6 +330,8 @@ export function completeSlip(
       worker: session.worker,
       orderId: params.orderId,
       items: params.items,
+      codes: params.codes ?? [],
+      shopOrderNo: params.shopOrderNo ?? "",
       doneAt: toIso(now),
       startedAt: toIso(session.startedAt),
       durationSec,
