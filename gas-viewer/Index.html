@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  /*
+   * 梱包作業記録ビューア — 画面
+   * 原本: リポジトリ game-packing-support の gas-viewer/Index.html
+   *
+   * 事務所のPCでクレーム対応のときに開く前提。
+   * 「誰が・いつ・何に・何秒」を、目を横に動かさずに読めることを最優先にする。
+   *
+   * 見た目の基準は DESIGN.md（ウェルスナビ）。ただし業務画面なので、
+   * 本文を15pxに下げて密度を上げ、数字は桁揃え（tabular-nums）にしている。
+   */
+  :root {
+    --navy: #004d94;      /* 主の操作（探す・開く） */
+    --blue: #0984e3;      /* 従の操作（リンク・切り替え）とフォーカス */
+    --text: #333333;
+    --text-sub: #666666;
+    --text-muted: #888888;
+    --danger: #ee0f3e;    /* 取り消し（梱包のやり直し）の印 */
+    --ground: #f0f3f5;    /* 地 */
+    --surface: #ffffff;   /* 面 */
+    --tint: #e2f2fd;      /* 見出し行・選択中 */
+    --line: #e3e8ec;      /* 表の区切り */
+    --input-line: #cccccc;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--ground);
+    color: var(--text);
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    letter-spacing: normal;
+  }
+  button, input, select { font: inherit; color: inherit; letter-spacing: normal; }
+  :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  [hidden] { display: none !important; }
+
+  /* ---------- ボタン ---------- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 0 24px;
+    border: 0;
+    border-radius: 100px;
+    background: var(--navy);
+    color: #fff;
+    font-weight: 700;
+    line-height: 1.4;
+    cursor: pointer;
+  }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .btn.wide { width: 100%; }
+  .text-btn {
+    min-height: 44px;
+    padding: 0 4px;
+    border: 0;
+    background: none;
+    color: var(--blue);
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  /* ---------- 入力 ---------- */
+  .field { margin-bottom: 16px; }
+  .field > label, .field > .label {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--text-sub);
+  }
+  input[type="text"], input[type="password"], input[type="date"], select {
+    width: 100%;
+    min-width: 0;
+    min-height: 44px;
+    padding: 8px 14px;
+    border: 1px solid var(--input-line);
+    border-radius: 8px;
+    background: #fff;
+  }
+  input:focus-visible, select:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 0;
+    border-color: var(--blue);
+  }
+  .error {
+    margin: 12px 0 0;
+    color: var(--danger);
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-line;
+  }
+
+  /* ---------- ログイン ---------- */
+  .login { min-height: 100%; display: grid; place-items: center; padding: 24px; }
+  .login form {
+    width: min(380px, 100%);
+    padding: 32px;
+    background: var(--surface);
+    border-radius: 24px;
+  }
+  .login h1 { margin: 0 0 4px; font-size: 22px; line-height: 1.4; color: var(--navy); }
+  .login p.lead { margin: 0 0 24px; color: var(--text-sub); }
+
+  /* ---------- 全体の枠 ---------- */
+  .app { min-height: 100%; display: grid; grid-template-rows: auto 1fr; }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 24px;
+    min-height: 60px;
+    background: var(--surface);
+  }
+  header h1 { margin: 0; font-size: 17px; line-height: 1.4; color: var(--navy); }
+  header .spacer { flex: 1; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    gap: 24px;
+    padding: 24px;
+    align-items: start;
+  }
+  .layout.collapsed { grid-template-columns: minmax(0, 1fr); }
+  .layout.collapsed .conditions { display: none; }
+
+  /* ---------- 検索条件 ---------- */
+  .conditions {
+    position: sticky;
+    top: 24px;
+    padding: 24px;
+    background: var(--surface);
+    border-radius: 24px;
+  }
+  .period { display: grid; gap: 8px; }
+  .period .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+  .period .row span { font-size: 13px; color: var(--text-sub); }
+  .hint { margin: -8px 0 20px; font-size: 12px; line-height: 1.6; color: var(--text-muted); }
+
+  /* ---------- 結果 ---------- */
+  .result-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 16px;
+    margin-bottom: 12px;
+  }
+  .result-head .count { font-size: 18px; font-weight: 700; line-height: 1.4; }
+  .result-head .query { color: var(--text-sub); font-size: 14px; }
+  .notice {
+    margin: 0 0 12px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    background: var(--tint);
+    font-size: 14px;
+  }
+  .empty {
+    padding: 48px 24px;
+    border-radius: 24px;
+    background: var(--surface);
+    color: var(--text-sub);
+    text-align: center;
+  }
+
+  /* 条件を変えた後の、古い結果 */
+  .results.stale .sheet { opacity: .4; }
+
+  .sheet {
+    background: var(--surface);
+    border-radius: 24px;
+    padding: 8px 0;
+    overflow-x: auto;
+  }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th {
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--text-sub);
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--line);
+  }
+  td {
+    padding: 12px 16px;
+    vertical-align: top;
+    border-bottom: 1px solid var(--line);
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  /* 左の3列＝誰が・いつ・何秒。狭く詰めて、目の移動を減らす */
+  td.worker { white-space: nowrap; font-weight: 700; font-size: 16px; line-height: 1.4; }
+  td.when { white-space: nowrap; }
+  td.when .time { font-weight: 500; }
+  td.duration, th.duration { text-align: right; white-space: nowrap; }
+  td.duration { font-weight: 700; font-size: 17px; line-height: 1.4; }
+  .sub { display: block; font-size: 12px; line-height: 1.6; color: var(--text-muted); }
+
+  td.products ul { margin: 0; padding: 0; list-style: none; }
+  td.products li + li { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--line); }
+  td.products .code { margin-left: 8px; font-size: 12px; color: var(--text-muted); }
+
+  td.order { white-space: nowrap; }
+  td.order .no { font-weight: 500; }
+  td.order .none { color: var(--text-muted); }
+
+  tr.cancelled td { color: var(--text-muted); }
+  tr.cancelled td.duration { text-decoration: line-through; }
+  .tag {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 0 10px;
+    border-radius: 100px;
+    background: var(--danger);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.8;
+  }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+    .conditions { position: static; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<!-- ログイン -->
+<section class="login" id="loginView" hidden>
+  <form id="loginForm">
+    <h1>梱包作業記録</h1>
+    <p class="lead">パスワードを入れてください</p>
+    <div class="field">
+      <label for="password">パスワード</label>
+      <input type="password" id="password" autocomplete="current-password" required>
+    </div>
+    <button class="btn wide" type="submit" id="loginButton">開く</button>
+    <p class="error" id="loginError" role="alert"></p>
+  </form>
+</section>
+
+<!-- 本体 -->
+<div class="app" id="appView" hidden>
+  <header>
+    <h1>梱包作業記録</h1>
+    <button class="text-btn" type="button" id="toggleButton" aria-controls="searchForm" aria-expanded="true">条件を隠す</button>
+    <span class="spacer"></span>
+    <button class="text-btn" type="button" id="logoutButton">ログアウト</button>
+  </header>
+
+  <div class="layout" id="layout">
+    <form class="conditions" id="searchForm">
+      <div class="field">
+        <label for="qShopOrder">注文番号</label>
+        <input type="text" id="qShopOrder" placeholder="一部だけでも探せます">
+      </div>
+      <div class="field">
+        <label for="qMgmt">管理番号</label>
+        <input type="text" id="qMgmt">
+      </div>
+      <div class="field">
+        <label for="qProduct">商品名</label>
+        <input type="text" id="qProduct" placeholder="例：PS2">
+      </div>
+      <div class="field">
+        <label for="qWorker">担当者</label>
+        <select id="qWorker"><option value="">すべて</option></select>
+      </div>
+      <div class="field">
+        <span class="label">期間</span>
+        <div class="period">
+          <div class="row">
+            <input type="date" id="qFrom" aria-label="期間の始まり">
+            <span>から</span>
+          </div>
+          <div class="row">
+            <input type="date" id="qTo" aria-label="期間の終わり">
+            <span>まで</span>
+          </div>
+        </div>
+      </div>
+      <p class="hint">期間を空けると、先月の1日から今日までを探します</p>
+      <button class="btn wide" type="submit" id="searchButton">探す</button>
+      <p class="error" id="searchError" role="alert"></p>
+    </form>
+
+    <main class="results" id="results" aria-live="polite">
+      <div class="empty">注文番号や担当者を入れて「探す」を押してください</div>
+    </main>
+  </div>
+</div>
+
+<script>
+  // ログインの合言葉はこのタブの中だけに置く（タブを閉じれば消える）。
+  // 有効期限はサーバー側で6時間。切れたらパスワードの画面に戻す。
+  var TOKEN_KEY = "packing-viewer-token";
+
+  function getToken() {
+    try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+  }
+  function setToken(t) {
+    try { t ? sessionStorage.setItem(TOKEN_KEY, t) : sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
+  }
+
+  /** google.script.run を Promise で包む */
+  function call(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+      runner[fn].apply(runner, args);
+    });
+  }
+
+  function isAuthError(err) {
+    return ((err && err.message) || "").indexOf("ログイン") >= 0;
+  }
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function showLogin(message) {
+    setToken("");
+    $("appView").hidden = true;
+    $("loginView").hidden = false;
+    $("loginError").textContent = message || "";
+    $("password").value = "";
+    $("password").focus();
+  }
+
+  function showApp() {
+    $("loginView").hidden = true;
+    $("appView").hidden = false;
+    $("qShopOrder").focus();
+  }
+
+  // ---------- ログイン ----------
+
+  $("loginForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var button = $("loginButton");
+    button.disabled = true;
+    $("loginError").textContent = "";
+
+    call("login", $("password").value)
+      .then(function (token) {
+        setToken(token);
+        return loadWorkers().then(showApp);
+      })
+      .catch(function (err) {
+        $("loginError").textContent = err.message;
+        $("password").select();
+      })
+      .then(function () { button.disabled = false; });
+  });
+
+  $("logoutButton").addEventListener("click", function () { showLogin(""); });
+
+  function loadWorkers() {
+    return call("listWorkers", getToken()).then(function (workers) {
+      var select = $("qWorker");
+      select.length = 1; // 「すべて」だけ残す
+      workers.forEach(function (name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        select.appendChild(opt);
+      });
+    });
+  }
+
+  // ---------- 検索条件の欄を開け閉めする ----------
+  // 閉じている間も、表の上に「どの条件で探したか」を出し続ける。
+
+  $("toggleButton").addEventListener("click", function () {
+    var layout = $("layout");
+    var collapsed = layout.classList.toggle("collapsed");
+    this.textContent = collapsed ? "条件を表示" : "条件を隠す";
+    this.setAttribute("aria-expanded", String(!collapsed));
+    if (!collapsed) $("qShopOrder").focus();
+  });
+
+  // ---------- 検索 ----------
+
+  var hasResult = false;
+
+  function readQuery() {
+    return {
+      shopOrderNo: $("qShopOrder").value.trim(),
+      mgmtNo: $("qMgmt").value.trim(),
+      product: $("qProduct").value.trim(),
+      worker: $("qWorker").value,
+      from: $("qFrom").value,
+      to: $("qTo").value,
+    };
+  }
+
+  // 結果を出した後に条件を変えたら、今の結果は古いと分かるようにする。
+  // 画面の条件と結果が食い違って見え、別の人の記録を取り違えるのを防ぐ（2026-10-04）。
+  function markStale() {
+    if (!hasResult) return;
+    var main = $("results");
+    if (main.classList.contains("stale")) return;
+    main.classList.add("stale");
+    var note = el("div", "notice", "条件が変わりました。「探す」を押すと更新されます");
+    note.id = "staleNotice";
+    main.insertBefore(note, main.firstChild);
+  }
+  ["input", "change"].forEach(function (type) {
+    $("searchForm").addEventListener(type, markStale);
+  });
+
+  $("searchForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var button = $("searchButton");
+    button.disabled = true;
+    button.textContent = "探しています…";
+    $("searchError").textContent = "";
+
+    var query = readQuery();
+
+    call("searchSlips", getToken(), query)
+      .then(function (result) { render(result, query); })
+      .catch(function (err) {
+        if (isAuthError(err)) { showLogin(err.message); return; }
+        $("searchError").textContent = err.message;
+      })
+      .then(function () {
+        button.disabled = false;
+        button.textContent = "探す";
+      });
+  });
+
+  /**
+   * 検索結果を伝票ごとにまとめ、表にする。
+   * 同梱の伝票は商品ごとに行が分かれて記録されているので、受信IDでまとめる。
+   */
+  function render(result, query) {
+    var main = $("results");
+    main.textContent = "";
+    main.classList.remove("stale");
+    hasResult = true;
+
+    var groups = [];
+    var index = {};
+    result.rows.forEach(function (r) {
+      var key = r.receiveId || (r.mgmtNo + r.doneAt);
+      if (!(key in index)) {
+        index[key] = groups.length;
+        groups.push({ head: r, items: [] });
+      }
+      groups[index[key]].items.push(r);
+    });
+
+    // 表の上に「何の結果か」を出す。条件欄を閉じていても分かるように。
+    var head = el("div", "result-head");
+    head.appendChild(el("span", "count", groups.length + "件の伝票"));
+    head.appendChild(el("span", "query", describeQuery(query, result.months)));
+    main.appendChild(head);
+
+    if (result.truncated) {
+      main.appendChild(el("div", "notice",
+        "該当が多いため、新しい順に" + result.rows.length + "行までを表示しています。条件を絞ってください"));
+    }
+
+    if (groups.length === 0) {
+      main.appendChild(el("div", "empty",
+        "該当する記録はありません。注文番号は一部だけでも探せます。期間も確かめてください"));
+      return;
+    }
+
+    var sheet = el("div", "sheet");
+    var table = el("table");
+    var thead = el("thead");
+    var tr = el("tr");
+    [["担当", ""], ["完了", ""], ["所要", "duration"], ["商品", ""], ["注文番号", ""]]
+      .forEach(function (c) { tr.appendChild(el("th", c[1], c[0])); });
+    thead.appendChild(tr);
+    table.appendChild(thead);
+
+    var tbody = el("tbody");
+    groups.forEach(function (g) { tbody.appendChild(slipRow(g)); });
+    table.appendChild(tbody);
+    sheet.appendChild(table);
+    main.appendChild(sheet);
+  }
+
+  function slipRow(g) {
+    var h = g.head;
+    var tr = el("tr", h.cancelled ? "cancelled" : "");
+
+    // 担当
+    var worker = el("td", "worker", h.worker);
+    if (h.cancelled) {
+      worker.appendChild(document.createElement("br"));
+      worker.appendChild(el("span", "tag", "取り消し"));
+    }
+    tr.appendChild(worker);
+
+    // 完了（日時と便）
+    var when = el("td", "when");
+    when.appendChild(el("span", "time", shortDate(h.date) + " " + (h.doneAt || "").substring(0, 5)));
+    when.appendChild(el("span", "sub", h.bin + " " + h.carrier));
+    tr.appendChild(when);
+
+    // 所要
+    tr.appendChild(el("td", "duration", h.durationSec != null ? formatDuration(h.durationSec) : "—"));
+
+    // 商品（同梱は1行ずつ）
+    var products = el("td", "products");
+    var list = el("ul");
+    g.items.forEach(function (it) {
+      var li = el("li");
+      li.appendChild(document.createTextNode(it.product));
+      if (it.code) li.appendChild(el("span", "code", it.code));
+      list.appendChild(li);
+    });
+    products.appendChild(list);
+    tr.appendChild(products);
+
+    // 注文番号と管理番号
+    var order = el("td", "order");
+    order.appendChild(h.shopOrderNo ? el("span", "no", h.shopOrderNo) : el("span", "none", "記録なし"));
+    order.appendChild(el("span", "sub", "管理 " + h.mgmtNo));
+    tr.appendChild(order);
+
+    return tr;
+  }
+
+  /** 探した条件を一文にする。条件欄を閉じていても、何の結果か分かるように */
+  function describeQuery(q, months) {
+    var parts = [];
+    if (q.shopOrderNo) parts.push("注文番号「" + q.shopOrderNo + "」");
+    if (q.mgmtNo) parts.push("管理番号「" + q.mgmtNo + "」");
+    if (q.product) parts.push("商品名「" + q.product + "」");
+    if (q.worker) parts.push("担当者：" + q.worker);
+    if (q.from || q.to) {
+      parts.push("期間：" + (q.from ? shortDate(q.from) : "") + "〜" + (q.to ? shortDate(q.to) : "今日"));
+    } else if (months && months.length) {
+      parts.push("期間：" + months[0].substring(5) + "/01〜今日");
+    }
+    return parts.join("　");
+  }
+
+  /** 2026-10-04 → 10/04 */
+  function shortDate(d) {
+    return d && d.length >= 10 ? d.substring(5, 7) + "/" + d.substring(8, 10) : d || "";
+  }
+
+  /**
+   * 秒 → 「2分05秒」。
+   * 「2:05」の形は、隣の完了時刻（13:56）と見分けがつかないため使わない。
+   * 秒は2桁にそろえ、右揃えで縦に比べやすくする。
+   */
+  function formatDuration(sec) {
+    var total = Math.round(sec);
+    var m = Math.floor(total / 60);
+    var s = total % 60;
+    if (m === 0) return s + "秒";
+    return m + "分" + (s < 10 ? "0" + s : s) + "秒";
+  }
+
+  /** 要素を作る。文字は textContent で入れ、HTMLとして解釈させない */
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  // ---------- 起動 ----------
+  // 合言葉が残っていれば、それで作業者一覧を読んでみる。
+  // 期限切れならパスワードの画面に戻す。
+  if (getToken()) {
+    loadWorkers().then(showApp).catch(function (err) {
+      showLogin(isAuthError(err) ? err.message : "");
+    });
+  } else {
+    showLogin("");
+  }
+</script>
+</body>
+</html>
