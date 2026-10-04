@@ -218,6 +218,21 @@
   td.order .no { font-weight: 500; }
   td.order .none { color: var(--text-muted); }
 
+  /* 20分以上の梱包。梱包以外の作業が混ざった可能性があり、ヒアリングの手がかりにする */
+  td.duration.long { color: var(--danger); }
+  .long-chip {
+    min-height: 32px;
+    padding: 0 14px;
+    border: 1px solid var(--danger);
+    border-radius: 100px;
+    background: #fff;
+    color: var(--danger);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .long-chip[aria-pressed="true"] { background: var(--danger); color: #fff; }
+
   tr.cancelled td { color: var(--text-muted); }
   tr.cancelled td.duration { text-decoration: line-through; }
   .tag {
@@ -398,6 +413,17 @@
 
   var hasResult = false;
 
+  /**
+   * 「長い梱包」とみなす所要時間（秒）。
+   * 20分を超えるのは、梱包以外の対応をはさんだ場合と見られる（現場の感覚、2026-10-04）。
+   * V4 の平均・推移の集計で外す線にも同じ値を使う予定。
+   */
+  var LONG_SEC = 20 * 60;
+
+  // 直近の検索結果。20分以上だけに絞るとき、表だけを作り直すのに使う
+  var lastGroups = [];
+  var onlyLong = false;
+
   function readQuery() {
     return {
       shopOrderNo: $("qShopOrder").value.trim(),
@@ -448,12 +474,18 @@
   /**
    * 検索結果を伝票ごとにまとめ、表にする。
    * 同梱の伝票は商品ごとに行が分かれて記録されているので、受信IDでまとめる。
+   *
+   * ⚠️ サーバーは新しい行から順に返す。同梱の伝票では2行目以降が先に来るため、
+   * 所要時間（1行目にだけ記録されている）は、どの行に入っていても拾う。
+   * 商品は先頭に足していき、元の並びに戻す（2026-10-04 に、同梱の所要時間が
+   * 「—」になる不具合として発見）。
    */
   function render(result, query) {
     var main = $("results");
     main.textContent = "";
     main.classList.remove("stale");
     hasResult = true;
+    onlyLong = false;
 
     var groups = [];
     var index = {};
@@ -461,14 +493,32 @@
       var key = r.receiveId || (r.mgmtNo + r.doneAt);
       if (!(key in index)) {
         index[key] = groups.length;
-        groups.push({ head: r, items: [] });
+        groups.push({ head: r, items: [], durationSec: null });
       }
-      groups[index[key]].items.push(r);
+      var g = groups[index[key]];
+      g.items.unshift(r);
+      if (r.durationSec != null) g.durationSec = r.durationSec;
     });
+    lastGroups = groups;
 
     // 表の上に「何の結果か」を出す。条件欄を閉じていても分かるように。
     var head = el("div", "result-head");
     head.appendChild(el("span", "count", groups.length + "件の伝票"));
+
+    var longCount = groups.filter(isLong).length;
+    if (longCount > 0) {
+      var chip = el("button", "long-chip", "20分以上 " + longCount + "件");
+      chip.type = "button";
+      chip.setAttribute("aria-pressed", "false");
+      chip.title = "押すと20分以上の伝票だけを表示します";
+      chip.addEventListener("click", function () {
+        onlyLong = !onlyLong;
+        chip.setAttribute("aria-pressed", String(onlyLong));
+        fillRows();
+      });
+      head.appendChild(chip);
+    }
+
     head.appendChild(el("span", "query", describeQuery(query, result.months)));
     main.appendChild(head);
 
@@ -493,10 +543,27 @@
     table.appendChild(thead);
 
     var tbody = el("tbody");
-    groups.forEach(function (g) { tbody.appendChild(slipRow(g)); });
+    tbody.id = "slipRows";
     table.appendChild(tbody);
     sheet.appendChild(table);
     main.appendChild(sheet);
+
+    fillRows();
+  }
+
+  /** 20分以上の伝票か。取り消しになった伝票は、やり直す前の時間なので数えない */
+  function isLong(g) {
+    return !g.head.cancelled && g.durationSec != null && g.durationSec >= LONG_SEC;
+  }
+
+  /** 表の行を作り直す。20分以上だけに絞るときもここを通る */
+  function fillRows() {
+    var tbody = $("slipRows");
+    if (!tbody) return;
+    tbody.textContent = "";
+    lastGroups
+      .filter(function (g) { return !onlyLong || isLong(g); })
+      .forEach(function (g) { tbody.appendChild(slipRow(g)); });
   }
 
   function slipRow(g) {
@@ -517,8 +584,9 @@
     when.appendChild(el("span", "sub", h.bin + " " + h.carrier));
     tr.appendChild(when);
 
-    // 所要
-    tr.appendChild(el("td", "duration", h.durationSec != null ? formatDuration(h.durationSec) : "—"));
+    // 所要。同梱の伝票は、まとめたときに拾った値を使う
+    tr.appendChild(el("td", "duration" + (isLong(g) ? " long" : ""),
+      g.durationSec != null ? formatDuration(g.durationSec) : "—"));
 
     // 商品（同梱は1行ずつ）
     var products = el("td", "products");
