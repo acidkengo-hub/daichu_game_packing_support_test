@@ -36,7 +36,13 @@ var FAIL_WINDOW_SEC = 10 * 60;
 var FAIL_LIMIT = 5;
 
 /** 検索結果の上限（行） */
-var SEARCH_LIMIT = 300;
+/**
+ * 「すべて」の表に返す行の上限。
+ * 1日の梱包は60〜150件あり、300行では2〜5日分で上限に達していた（2026-10-04）。
+ * 1000行で、1人の担当分ならおよそ1〜2週間分。それより古い日は、
+ * 作業日のボタンから1日ずつ取り直す（1日分なら上限に当たらない）。
+ */
+var SEARCH_LIMIT = 1000;
 
 /**
  * 「長い梱包」とみなす所要時間（秒）。
@@ -122,14 +128,20 @@ function requireToken_(token) {
 /**
  * 伝票の記録を検索する。
  *
- * query の項目（すべて省略可。ただし何か1つは指定すること）:
+ * query の項目（すべて省略可。期間だけで探してもよい）:
  *   shopOrderNo … ショップの注文番号（部分一致）
  *   mgmtNo      … 管理番号（部分一致）
  *   product     … 商品名（部分一致、大文字小文字を区別しない）
  *   worker      … 作業者（完全一致）
- *   from, to    … 期間（yyyy-MM-dd）。省略時は今月と先月
+ *   from, to    … 期間（yyyy-MM-dd）。省略時は先月の1日〜今日
  *
- * 返り値: { rows: [...], truncated: 上限で打ち切ったか, months: 見た月 }
+ * 返り値:
+ *   rows      … 該当した行（新しい順、SEARCH_LIMIT 行まで）
+ *   truncated … 上限で打ち切ったか
+ *   days      … 期間内の作業日ごとの伝票の件数と20分以上の件数（古い順）。
+ *                上限で打ち切っても、最後まで読んで数える。
+ *                画面はこれで作業日のボタンを作り、欠けている日は1日ずつ取り直す
+ *   months    … 見た月
  */
 function searchSlips(token, query) {
   requireToken_(token);
@@ -140,17 +152,19 @@ function searchSlips(token, query) {
   var product = norm_(query.product).toLowerCase();
   var worker = norm_(query.worker);
 
-  if (!shopOrderNo && !mgmtNo && !product && !worker) {
-    throw new Error("注文番号・管理番号・商品名・作業者のどれか1つは入れてください");
-  }
+  // 以前は「どれか1つは必ず入れる」決まりにしていた（一度に読み込みすぎないため）。
+  // 作業日ごとに1日分を取り直せるようになったので、期間だけで探してもよいことにした。
+  // 「この1週間に誰が何を梱包したか」を全員分見られる（2026-10-04）。
 
   var range = resolveRange_(query.from, query.to);
   var ss = openBook_();
   var rows = [];
   var truncated = false;
+  var days = {};   // date → { slips: {伝票のキー: true}, count, longCount }
+  var returned = {}; // 返し始めた伝票のキー。上限で同梱の伝票を途中で切らないために使う
 
-  // 新しい月から順に見る。上限に達したら、それ以上古い月は読まない。
-  for (var m = range.months.length - 1; m >= 0 && !truncated; m--) {
+  // 新しい月から順に見る。上限に達しても読み続け、作業日ごとの件数だけは最後まで数える。
+  for (var m = range.months.length - 1; m >= 0; m--) {
     var sheet = ss.getSheetByName("伝票_" + range.months[m]);
     if (!sheet) continue;
 
@@ -169,6 +183,32 @@ function searchSlips(token, query) {
       if (mgmtNo && String(r[SLIP.MGMT_NO - 1]).indexOf(mgmtNo) < 0) continue;
       if (product && String(r[SLIP.PRODUCT - 1]).toLowerCase().indexOf(product) < 0) continue;
 
+      var doneAt = cellText_(r[SLIP.DONE_AT - 1], "HH:mm:ss");
+      var receiveId = String(r[SLIP.RECEIVE_ID - 1]);
+      var durRaw = r[SLIP.DURATION - 1];
+      var cancelled = String(r[SLIP.CANCEL - 1]) === "取り消し";
+
+      // 作業日ごとの件数。同梱の伝票は複数行あるので、画面と同じキーで1件に数える
+      var d = days[date] || (days[date] = { slips: {}, count: 0, longCount: 0 });
+      var slipKey = receiveId || (String(r[SLIP.MGMT_NO - 1]) + doneAt);
+      if (!d.slips[slipKey]) {
+        d.slips[slipKey] = true;
+        d.count++;
+      }
+      // 20分以上は、所要時間の入っている行（同梱の1行目）で数える。取り消しは数えない
+      if (durRaw !== "" && durRaw !== null && !cancelled && Number(durRaw) >= LONG_SEC) {
+        d.longCount++;
+      }
+
+      // 上限に達したら、それ以上は返さない。
+      // ただし返し始めた伝票の残りの行（同梱の2行目以降）は返す。
+      // 切ってしまうと、画面でその伝票の商品が欠けて見えるため。
+      if (rows.length >= SEARCH_LIMIT && !returned[slipKey]) {
+        truncated = true;
+        continue;
+      }
+      returned[slipKey] = true;
+
       rows.push({
         date: date,
         bin: String(r[SLIP.BIN - 1]),
@@ -178,20 +218,19 @@ function searchSlips(token, query) {
         product: String(r[SLIP.PRODUCT - 1]),
         code: String(r[SLIP.CODE - 1] || ""),
         worker: String(r[SLIP.WORKER - 1]),
-        doneAt: cellText_(r[SLIP.DONE_AT - 1], "HH:mm:ss"),
-        durationSec: r[SLIP.DURATION - 1] === "" ? null : Number(r[SLIP.DURATION - 1]),
-        cancelled: String(r[SLIP.CANCEL - 1]) === "取り消し",
-        receiveId: String(r[SLIP.RECEIVE_ID - 1]),
+        doneAt: doneAt,
+        durationSec: durRaw === "" ? null : Number(durRaw),
+        cancelled: cancelled,
+        receiveId: receiveId,
       });
-
-      if (rows.length >= SEARCH_LIMIT) {
-        truncated = true;
-        break;
-      }
     }
   }
 
-  return { rows: rows, truncated: truncated, months: range.months };
+  var dayList = Object.keys(days).sort().map(function (k) {
+    return { date: k, count: days[k].count, longCount: days[k].longCount };
+  });
+
+  return { rows: rows, truncated: truncated, days: dayList, months: range.months };
 }
 
 /** 作業者の一覧。検索画面の選択肢に使う */

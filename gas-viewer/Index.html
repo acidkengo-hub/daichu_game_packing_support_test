@@ -233,6 +233,31 @@
   }
   .long-chip[aria-pressed="true"] { background: var(--danger); color: #fff; }
 
+  /* 作業日で絞り込むボタン。作業した日だけを並べる */
+  .days {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 12px;
+  }
+  .day-chip {
+    min-height: 36px;
+    padding: 0 14px;
+    border: 1px solid var(--input-line);
+    border-radius: 100px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+  }
+  .day-chip .n { margin-left: 6px; font-size: 12px; color: var(--text-muted); font-weight: 400; }
+  .day-chip[aria-pressed="true"] { background: var(--navy); border-color: var(--navy); color: #fff; }
+  .day-chip[aria-pressed="true"] .n { color: #fff; }
+  .month-label { margin-left: 4px; font-size: 13px; font-weight: 700; color: var(--text-sub); }
+
   tr.cancelled td { color: var(--text-muted); }
   tr.cancelled td.duration { text-decoration: line-through; }
   .tag {
@@ -432,24 +457,11 @@
     try { t ? sessionStorage.setItem(TOKEN_KEY, t) : sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
   }
 
-  /**
-   * google.script.run を Promise で包む。
-   *
-   * 呼べるのは「最後にデプロイした版」の Code.gs にある関数だけ。
-   * Index.html だけ新しくして Code.gs を貼り忘れる（または貼る前にデプロイする）と、
-   * 関数が見つからない。そのときは原因が分かる文面で知らせる（2026-10-04 に発生）。
-   */
+  /** google.script.run を Promise で包む */
   function call(fn) {
     var args = Array.prototype.slice.call(arguments, 1);
     return new Promise(function (resolve, reject) {
       var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
-      if (typeof runner[fn] !== "function") {
-        reject(new Error(
-          "サーバー側に「" + fn + "」がありません\n" +
-            "　→ Apps Script の コード.gs を最新にして保存し、新しいバージョンでデプロイしてください"
-        ));
-        return;
-      }
       runner[fn].apply(runner, args);
     });
   }
@@ -535,6 +547,12 @@
   // 直近の検索結果。20分以上だけに絞るとき、表だけを作り直すのに使う
   var lastGroups = [];
   var onlyLong = false;
+  var dayFilter = "";       // 作業日で絞り込み中ならその日（yyyy-MM-dd）。空なら「すべて」
+  var lastQuery = null;     // 表に出している結果を探したときの条件。日ごとに取り直すときに使う
+  var dayInfo = {};         // date → { count, longCount }（サーバーが期間内を最後まで数えた値）
+  var dayList = [];         // 作業日（古い順）
+  var dayCache = {};        // date → その日の伝票（1日分を取り直したもの）
+  var truncatedAll = false; // 「すべて」の表が上限で打ち切られているか
 
   function readQuery() {
     return {
@@ -584,24 +602,20 @@
   });
 
   /**
-   * 検索結果を伝票ごとにまとめ、表にする。
-   * 同梱の伝票は商品ごとに行が分かれて記録されているので、受信IDでまとめる。
+   * 行を伝票ごとにまとめ、古い順に並べる。
    *
    * ⚠️ サーバーは新しい行から順に返す。同梱の伝票では2行目以降が先に来るため、
    * 所要時間（1行目にだけ記録されている）は、どの行に入っていても拾う。
    * 商品は先頭に足していき、元の並びに戻す（2026-10-04 に、同梱の所要時間が
    * 「—」になる不具合として発見）。
+   *
+   * まとめ終わってから古い順（上が作業の始まり）に並べ替える。
+   * 新しい順だと、日誌として読むときに混乱するため（2026-10-04 現場の要望）。
    */
-  function render(result, query) {
-    var main = $("results");
-    main.textContent = "";
-    main.classList.remove("stale");
-    hasResult = true;
-    onlyLong = false;
-
+  function groupRows(rows) {
     var groups = [];
     var index = {};
-    result.rows.forEach(function (r) {
+    rows.forEach(function (r) {
       var key = r.receiveId || (r.mgmtNo + r.doneAt);
       if (!(key in index)) {
         index[key] = groups.length;
@@ -611,39 +625,83 @@
       g.items.unshift(r);
       if (r.durationSec != null) g.durationSec = r.durationSec;
     });
+    groups.sort(function (a, b) {
+      var ka = a.head.date + " " + a.head.doneAt;
+      var kb = b.head.date + " " + b.head.doneAt;
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+    return groups;
+  }
+
+  /**
+   * 検索結果を表にする。
+   *
+   * 作業日のボタンは、サーバーが期間内を最後まで数えた一覧（result.days）から作る。
+   * 「すべて」の表は新しい方から上限まで（1日60〜150件あるため、長い期間は収まらない）。
+   * 欠けている日は、その日のボタンを押したときに1日分を取り直す（2026-10-04）。
+   */
+  function render(result, query) {
+    var main = $("results");
+    main.textContent = "";
+    main.classList.remove("stale");
+    hasResult = true;
+    onlyLong = false;
+    dayFilter = "";
+    dayCache = {};
+    lastQuery = query;
+    truncatedAll = !!result.truncated;
+
+    var groups = groupRows(result.rows);
     lastGroups = groups;
+
+    // 作業日の一覧。古いサーバー（days を返さない版）なら、手元の伝票から作る
+    dayInfo = {};
+    if (result.days) {
+      result.days.forEach(function (d) { dayInfo[d.date] = { count: d.count, longCount: d.longCount }; });
+    } else {
+      groups.forEach(function (g) {
+        var x = dayInfo[g.head.date] || (dayInfo[g.head.date] = { count: 0, longCount: 0 });
+        x.count++;
+        if (isLong(g)) x.longCount++;
+      });
+    }
+    dayList = Object.keys(dayInfo).sort();
 
     // 表の上に「何の結果か」を出す。条件欄を閉じていても分かるように。
     var head = el("div", "result-head");
-    head.appendChild(el("span", "count", groups.length + "件の伝票"));
+    var count = el("span", "count");
+    count.id = "resultCount";
+    head.appendChild(count);
 
-    var longCount = groups.filter(isLong).length;
-    if (longCount > 0) {
-      var chip = el("button", "long-chip", "20分以上 " + longCount + "件");
-      chip.type = "button";
-      chip.setAttribute("aria-pressed", "false");
-      chip.title = "押すと20分以上の伝票だけを表示します";
-      chip.addEventListener("click", function () {
-        onlyLong = !onlyLong;
-        chip.setAttribute("aria-pressed", String(onlyLong));
-        fillRows();
-      });
-      head.appendChild(chip);
-    }
+    var chip = el("button", "long-chip");
+    chip.id = "longChip";
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", "false");
+    chip.title = "押すと20分以上の伝票だけを表示します";
+    chip.addEventListener("click", function () {
+      onlyLong = !onlyLong;
+      chip.setAttribute("aria-pressed", String(onlyLong));
+      fillRows();
+    });
+    head.appendChild(chip);
 
     head.appendChild(el("span", "query", describeQuery(query, result.months)));
     main.appendChild(head);
 
-    if (result.truncated) {
-      main.appendChild(el("div", "notice",
-        "該当が多いため、新しい順に" + result.rows.length + "行までを表示しています。条件を絞ってください"));
-    }
-
-    if (groups.length === 0) {
+    if (dayList.length === 0) {
+      chip.hidden = true;
+      count.textContent = "0件の伝票";
       main.appendChild(el("div", "empty",
         "該当する記録はありません。注文番号は一部だけでも探せます。期間も確かめてください"));
       return;
     }
+
+    main.appendChild(dayChips());
+
+    var notice = el("div", "notice");
+    notice.id = "truncNotice";
+    notice.hidden = true;
+    main.appendChild(notice);
 
     var sheet = el("div", "sheet");
     var table = el("table");
@@ -663,17 +721,144 @@
     fillRows();
   }
 
+  /** 期間内の伝票の合計件数と20分以上の合計件数（サーバーが最後まで数えた値） */
+  function totals() {
+    var t = { count: 0, longCount: 0 };
+    dayList.forEach(function (d) { t.count += dayInfo[d].count; t.longCount += dayInfo[d].longCount; });
+    return t;
+  }
+
+  /**
+   * 作業日ごとのボタン。作業した日だけを並べ、押すとその日の伝票だけにする。
+   * 月のカレンダーにしないのは、検索の期間が最大12か月あり、何枚も並んでしまうため。
+   * 月が変わるところに「11月」のような区切りを入れる。
+   */
+  function dayChips() {
+    var box = el("div", "days");
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", "作業日で絞り込む");
+
+    var buttons = [];
+    function add(label, n, value) {
+      var b = el("button", "day-chip", label);
+      b.type = "button";
+      b.appendChild(el("span", "n", n + "件"));
+      b.setAttribute("aria-pressed", String(value === dayFilter));
+      b.addEventListener("click", function () {
+        dayFilter = value;
+        buttons.forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+        fillRows();
+      });
+      buttons.push(b);
+      box.appendChild(b);
+    }
+
+    add("すべて", totals().count, "");
+    var multiMonth = dayList[0].substring(0, 7) !== dayList[dayList.length - 1].substring(0, 7);
+    var lastMonth = "";
+    dayList.forEach(function (d) {
+      var month = d.substring(0, 7);
+      if (multiMonth && month !== lastMonth) {
+        box.appendChild(el("span", "month-label", Number(d.substring(5, 7)) + "月"));
+        lastMonth = month;
+      }
+      add(dayLabel(d), dayInfo[d].count, d);
+    });
+    return box;
+  }
+
+  /** 2026-10-04 → 10/4(日) */
+  function dayLabel(d) {
+    var y = Number(d.substring(0, 4)), m = Number(d.substring(5, 7)), day = Number(d.substring(8, 10));
+    var w = "日月火水木金土".charAt(new Date(y, m - 1, day).getDay());
+    return m + "/" + day + "(" + w + ")";
+  }
+
   /** 20分以上の伝票か。取り消しになった伝票は、やり直す前の時間なので数えない */
   function isLong(g) {
     return !g.head.cancelled && g.durationSec != null && g.durationSec >= LONG_SEC;
   }
 
-  /** 表の行を作り直す。20分以上だけに絞るときもここを通る */
+  /**
+   * その日の伝票。最初の検索で全部そろっていればそれを、
+   * 欠けていれば（上限で打ち切られた古い日）1日分を取り直したものを使う。
+   * まだ取り直していなければ null を返す。
+   */
+  function groupsOfDay(day) {
+    if (dayCache[day]) return dayCache[day];
+    var have = lastGroups.filter(function (g) { return g.head.date === day; });
+    return have.length >= dayInfo[day].count ? have : null;
+  }
+
+  /** 欠けている日の記録を、1日分だけ取り直す */
+  function fetchDay(day) {
+    var q = {};
+    Object.keys(lastQuery).forEach(function (k) { q[k] = lastQuery[k]; });
+    q.from = day;
+    q.to = day;
+    return call("searchSlips", getToken(), q).then(function (res) {
+      dayCache[day] = groupRows(res.rows);
+    });
+  }
+
+  /**
+   * 表の行を作り直す。作業日・20分以上で絞るときもここを通る。
+   * 2つの絞り込みは同時に効く。「20分以上 ○件」と上の件数は、選んだ日に合わせる。
+   */
   function fillRows() {
     var tbody = $("slipRows");
     if (!tbody) return;
+
+    var groups, info;
+    if (dayFilter) {
+      info = dayInfo[dayFilter];
+      groups = groupsOfDay(dayFilter);
+      if (!groups) {
+        // 欠けている日。取り直してから描き直す
+        var want = dayFilter;
+        tbody.textContent = "";
+        var loading = el("tr");
+        var cell = el("td", "", "この日の記録を読み込んでいます…");
+        cell.colSpan = 5;
+        loading.appendChild(cell);
+        tbody.appendChild(loading);
+        fetchDay(want)
+          .then(function () { if (dayFilter === want) fillRows(); })
+          .catch(function (err) {
+            if (isAuthError(err)) { showLogin(err.message); return; }
+            cell.textContent = err.message;
+          });
+        return;
+      }
+    } else {
+      info = totals();
+      groups = lastGroups;
+    }
+
+    // 「20分以上」のボタン。件数は期間内（または選んだ日）を最後まで数えた値
+    var chip = $("longChip");
+    if (info.longCount === 0 && onlyLong) {
+      onlyLong = false;
+      chip.setAttribute("aria-pressed", "false");
+    }
+    chip.textContent = "20分以上 " + info.longCount + "件";
+    chip.hidden = info.longCount === 0;
+
+    $("resultCount").textContent = dayFilter
+      ? dayLabel(dayFilter) + "　" + info.count + "件の伝票（全" + totals().count + "件）"
+      : info.count + "件の伝票";
+
+    // 「すべて」で打ち切られているときだけ、お知らせを出す
+    var notice = $("truncNotice");
+    var partial = !dayFilter && truncatedAll;
+    notice.hidden = !partial;
+    if (partial) {
+      notice.textContent = "期間が長いため、新しい方から" + groups.length + "件の伝票を古い順に並べています。" +
+        "それより前の日は、日付のボタンを押すと、その日の記録をすべて表示します";
+    }
+
     tbody.textContent = "";
-    lastGroups
+    groups
       .filter(function (g) { return !onlyLong || isLong(g); })
       .forEach(function (g) { tbody.appendChild(slipRow(g)); });
   }
