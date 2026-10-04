@@ -11,7 +11,8 @@
  *   - 記録を返す関数は、すべて最初にトークンを確かめる
  *
  * 【画面から呼べる関数】
- *   login / searchSlips / listWorkers の3つだけ（＋何も返さない debugSearch）。
+ *   login / searchSlips / listWorkers / summarize の4つだけ
+ *   （＋何も返さない debugSearch / debugSummary）。
  *   補助関数は名前の末尾に「_」を付け、画面から呼べないようにしている。
  *
  * 【書き込まない】
@@ -36,6 +37,16 @@ var FAIL_LIMIT = 5;
 
 /** 検索結果の上限（行） */
 var SEARCH_LIMIT = 300;
+
+/**
+ * 「長い梱包」とみなす所要時間（秒）。
+ * 20分を超えるのは、梱包以外の対応をはさんだ場合と見られる（現場の感覚、2026-10-04）。
+ * 集計の中央値からは外し、件数を別に数える。画面側（Index.html の LONG_SEC）と同じ値にすること。
+ */
+var LONG_SEC = 20 * 60;
+
+/** 集計結果を覚えておく時間（秒）。記録は日中増えていくので短めにする */
+var SUMMARY_CACHE_SEC = 5 * 60;
 
 /** 検索で見る月数の上限。期間を広げすぎると読み込みが重くなるため */
 var SEARCH_MAX_MONTHS = 12;
@@ -193,6 +204,174 @@ function listWorkers(token) {
     .filter(function (n) { return n; });
 }
 
+// ===== 集計 =====
+
+/**
+ * 配送方法ごとに、全体と担当者ごとの件数・中央値・20分以上の件数、
+ * 週ごとの推移を返す。
+ *
+ * period: "thisMonth"（今月） / "lastMonth"（先月） / "last3"（今月＋前の2か月）
+ *
+ * 配送方法で分ける理由:
+ *   ネコポスはソフト中心で数十秒、宅急便は本体セット中心で数分かかる。
+ *   混ぜて集計すると、ネコポスを多く担当した人ほど速く見え、比較が成り立たない。
+ *
+ * 数え方:
+ *   - 所要時間の入っている行だけを数える（同梱の伝票は1行目にだけ入っている）
+ *   - 取り消しになった伝票は外す（やり直す前の時間のため）
+ *   - 件数には20分以上も含める。中央値は20分以上を外して計算する
+ *
+ * ⚠️ 1件あたりの時間は、何を梱包したかで大きく変わる。
+ * 人どうしの差は「腕前の差」ではなく「担当分の中身の差」を含む。
+ *
+ * 返り値:
+ *   { from, to, longSec,
+ *     carriers: [ { carrier, count, longCount, medianSec,
+ *                   workers: [ { name, count, longCount, medianSec,
+ *                                weeks: [ { week, count, longCount, medianSec } ] } ] } ] }
+ */
+function summarize(token, period) {
+  requireToken_(token);
+
+  var range = periodRange_(period);
+  var cacheKey = "sum2_" + range.from + "_" + range.to;
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  var ss = openBook_();
+  var byCarrier = {};
+
+  for (var m = 0; m < range.months.length; m++) {
+    var sheet = ss.getSheetByName("伝票_" + range.months[m]);
+    if (!sheet) continue;
+    var last = sheet.getLastRow();
+    if (last < 2) continue;
+
+    var values = sheet.getRange(2, 1, last - 1, SLIP_WIDTH).getValues();
+    for (var i = 0; i < values.length; i++) {
+      var r = values[i];
+      var dur = r[SLIP.DURATION - 1];
+      if (dur === "" || dur === null) continue;              // 同梱の2行目以降
+      if (String(r[SLIP.CANCEL - 1]) === "取り消し") continue;
+
+      var date = cellText_(r[SLIP.DATE - 1], "yyyy-MM-dd");
+      if (date < range.from || date > range.to) continue;
+
+      var name = String(r[SLIP.WORKER - 1]).trim();
+      var carrier = String(r[SLIP.CARRIER - 1]).trim();
+      if (!name || !carrier) continue;
+
+      var sec = Number(dur);
+      var c = byCarrier[carrier] || (byCarrier[carrier] = newBucket_());
+      c.workers = c.workers || {};
+      var w = c.workers[name] || (c.workers[name] = newBucket_());
+      w.weeks = w.weeks || {};
+      var week = weekStart_(date);
+      var wk = w.weeks[week] || (w.weeks[week] = newBucket_());
+
+      addSec_(c, sec);
+      addSec_(w, sec);
+      addSec_(wk, sec);
+    }
+  }
+
+  // 宅急便を先、ネコポスを次に。それ以外があれば後ろに並べる
+  var order = { "宅急便": 0, "ネコポス": 1 };
+  var carriers = Object.keys(byCarrier)
+    .sort(function (a, b) {
+      return (a in order ? order[a] : 9) - (b in order ? order[b] : 9);
+    })
+    .map(function (carrierName) {
+      var c = byCarrier[carrierName];
+      var workers = Object.keys(c.workers).map(function (name) {
+        var w = c.workers[name];
+        var weeks = Object.keys(w.weeks).sort().map(function (k) {
+          var x = w.weeks[k];
+          return { week: k, count: x.count, longCount: x.long, medianSec: median_(x.secs) };
+        });
+        return { name: name, count: w.count, longCount: w.long, medianSec: median_(w.secs), weeks: weeks };
+      });
+      workers.sort(function (a, b) { return b.count - a.count; });
+      return {
+        carrier: carrierName,
+        count: c.count,
+        longCount: c.long,
+        medianSec: median_(c.secs),
+        workers: workers,
+      };
+    });
+
+  var result = { from: range.from, to: range.to, longSec: LONG_SEC, carriers: carriers };
+  try {
+    cache.put(cacheKey, JSON.stringify(result), SUMMARY_CACHE_SEC);
+  } catch (e) {
+    // 100KB を超えたら覚えておかないだけ。集計そのものは返す
+  }
+  return result;
+}
+
+/** 集計の入れ物 */
+function newBucket_() {
+  return { count: 0, long: 0, secs: [] };
+}
+
+/** 1件分を入れる。20分以上は件数だけ数え、中央値には入れない */
+function addSec_(bucket, sec) {
+  bucket.count++;
+  if (sec >= LONG_SEC) bucket.long++;
+  else bucket.secs.push(sec);
+}
+
+/** 期間の選択肢から、始まりと終わりの日付と、読む月を決める */
+function periodRange_(period) {
+  var now = new Date();
+  var today = Utilities.formatDate(now, tz_(), "yyyy-MM-dd");
+  var y = Number(today.substring(0, 4));
+  var m = Number(today.substring(5, 7));
+
+  function firstOf(yy, mm) {
+    while (mm < 1) { mm += 12; yy--; }
+    return yy + "-" + (mm < 10 ? "0" + mm : mm) + "-01";
+  }
+  function lastOf(yy, mm) {
+    var d = new Date(yy, mm, 0); // mm 月の末日（mm は1始まり）
+    return Utilities.formatDate(d, tz_(), "yyyy-MM-dd");
+  }
+
+  var from, to;
+  if (period === "lastMonth") {
+    var py = m === 1 ? y - 1 : y;
+    var pm = m === 1 ? 12 : m - 1;
+    from = firstOf(py, pm);
+    to = lastOf(py, pm);
+  } else if (period === "last3") {
+    from = firstOf(y, m - 2);
+    to = today;
+  } else {
+    from = firstOf(y, m);
+    to = today;
+  }
+  return resolveRange_(from, to);
+}
+
+/** その日を含む週の月曜日（yyyy-MM-dd） */
+function weekStart_(dateStr) {
+  var d = new Date(dateStr + "T00:00:00");
+  var dow = d.getDay();                 // 0=日曜 … 6=土曜
+  var back = dow === 0 ? 6 : dow - 1;   // 月曜まで戻る日数
+  d.setDate(d.getDate() - back);
+  return Utilities.formatDate(d, tz_(), "yyyy-MM-dd");
+}
+
+/** 中央値（秒）。データが無ければ null */
+function median_(arr) {
+  if (!arr.length) return null;
+  var a = arr.slice().sort(function (x, y) { return x - y; });
+  var mid = Math.floor(a.length / 2);
+  return a.length % 2 ? a[mid] : Math.round((a[mid - 1] + a[mid]) / 2);
+}
+
 // ===== 小さな道具 =====
 
 function openBook_() {
@@ -302,4 +481,26 @@ function debugSearch() {
     console.log("1件目の項目: " + Object.keys(result.rows[0]).join(", "));
     console.log("1件目の注文番号あり: " + !!result.rows[0].shopOrderNo);
   }
+}
+
+/**
+ * エディタから実行して、集計が動くかを確かめる。
+ * 配送方法ごと・担当者ごとの件数・中央値・20分以上の件数と、週の数だけをログに出す。
+ */
+function debugSummary() {
+  var token = Utilities.getUuid();
+  CacheService.getScriptCache().put("tok_" + token, "1", 60);
+
+  ["thisMonth", "lastMonth", "last3"].forEach(function (p) {
+    var r = summarize(token, p);
+    console.log("[" + p + "] " + r.from + " 〜 " + r.to);
+    r.carriers.forEach(function (c) {
+      console.log("  ■" + c.carrier + ": " + c.count + "件 / 中央値 " + c.medianSec +
+        "秒 / 20分以上 " + c.longCount + "件");
+      c.workers.forEach(function (w) {
+        console.log("    " + w.name + ": " + w.count + "件 / 中央値 " + w.medianSec +
+          "秒 / 20分以上 " + w.longCount + "件 / " + w.weeks.length + "週");
+      });
+    });
+  });
 }

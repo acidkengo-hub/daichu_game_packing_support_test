@@ -247,6 +247,86 @@
     line-height: 1.8;
   }
 
+  /* ---------- 画面の切り替え（検索／集計） ---------- */
+  .tabs { display: flex; gap: 4px; }
+  .tab {
+    min-height: 44px;
+    padding: 0 16px;
+    border: 0;
+    border-bottom: 3px solid transparent;
+    background: none;
+    color: var(--text-sub);
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .tab[aria-selected="true"] { color: var(--navy); font-weight: 700; border-bottom-color: var(--navy); }
+
+  /* ---------- 集計 ---------- */
+  .summary-view { padding: 24px; max-width: 1100px; }
+  .summary-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 20px; }
+  .summary-bar label { font-weight: 500; color: var(--text-sub); font-size: 14px; }
+  .summary-bar select { width: auto; min-width: 160px; }
+  .summary-bar .query { color: var(--text-sub); font-size: 14px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .tile { padding: 20px 24px; border-radius: 24px; background: var(--surface); }
+  .tile h2 { margin: 0 0 8px; font-size: 16px; line-height: 1.4; }
+  .tile .label { display: block; font-size: 13px; color: var(--text-sub); }
+  .tile .median {
+    display: block;
+    margin: 2px 0 6px;
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1.4;
+    color: var(--navy);
+    font-variant-numeric: tabular-nums;
+  }
+  .tile .meta { font-size: 14px; color: var(--text-sub); font-variant-numeric: tabular-nums; }
+  .ratio { margin: 12px 0 0; font-size: 14px; color: var(--text-sub); }
+  .long-text { color: var(--danger); font-weight: 700; }
+
+  .segment {
+    display: inline-flex;
+    gap: 4px;
+    margin: 28px 0 12px;
+    padding: 4px;
+    border-radius: 100px;
+    background: var(--surface);
+  }
+  .segment button {
+    min-height: 40px;
+    padding: 0 20px;
+    border: 0;
+    border-radius: 100px;
+    background: none;
+    color: var(--text-sub);
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .segment button[aria-pressed="true"] { background: var(--navy); color: #fff; font-weight: 700; }
+
+  .workers td.num, .workers th.num { text-align: right; white-space: nowrap; }
+  .workers td.num { font-weight: 700; }
+  .workers tbody tr { cursor: pointer; }
+  .workers tbody tr:hover td { background: #f7fafc; }
+  .workers tbody tr.selected td { background: var(--tint); }
+  .worker-btn {
+    padding: 0;
+    text-align: left;
+    border: 0;
+    background: none;
+    font-weight: 700;
+    font-size: 16px;
+    cursor: pointer;
+  }
+
+  .chart-card { margin-top: 16px; padding: 20px 24px 16px; border-radius: 24px; background: var(--surface); }
+  .chart-card h3 { margin: 0 0 4px; font-size: 16px; line-height: 1.4; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 8px; font-size: 13px; color: var(--text-sub); }
+  .legend .swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px; border-radius: 2px; }
+  .chart-card svg { display: block; width: 100%; height: auto; }
+  .caution { margin: 16px 0 0; font-size: 13px; line-height: 1.6; color: var(--text-muted); }
+
   @media (max-width: 860px) {
     .layout { grid-template-columns: minmax(0, 1fr); padding: 16px; }
     .conditions { position: static; }
@@ -274,6 +354,10 @@
 <div class="app" id="appView" hidden>
   <header>
     <h1>梱包作業記録</h1>
+    <nav class="tabs" role="tablist" aria-label="画面の切り替え">
+      <button class="tab" type="button" role="tab" id="tabSearch" aria-selected="true">検索</button>
+      <button class="tab" type="button" role="tab" id="tabSummary" aria-selected="false">集計</button>
+    </nav>
     <button class="text-btn" type="button" id="toggleButton" aria-controls="searchForm" aria-expanded="true">条件を隠す</button>
     <span class="spacer"></span>
     <button class="text-btn" type="button" id="logoutButton">ログアウト</button>
@@ -319,6 +403,21 @@
       <div class="empty">注文番号や担当者を入れて「探す」を押してください</div>
     </main>
   </div>
+
+  <!-- 集計 -->
+  <section class="summary-view" id="summaryView" hidden>
+    <div class="summary-bar">
+      <label for="period">期間</label>
+      <select id="period">
+        <option value="thisMonth">今月</option>
+        <option value="lastMonth">先月</option>
+        <option value="last3">過去3か月</option>
+      </select>
+      <span class="query" id="summaryRange"></span>
+    </div>
+    <p class="error" id="summaryError" role="alert"></p>
+    <div id="summaryBody" aria-live="polite"></div>
+  </section>
 </div>
 
 <script>
@@ -333,11 +432,24 @@
     try { t ? sessionStorage.setItem(TOKEN_KEY, t) : sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
   }
 
-  /** google.script.run を Promise で包む */
+  /**
+   * google.script.run を Promise で包む。
+   *
+   * 呼べるのは「最後にデプロイした版」の Code.gs にある関数だけ。
+   * Index.html だけ新しくして Code.gs を貼り忘れる（または貼る前にデプロイする）と、
+   * 関数が見つからない。そのときは原因が分かる文面で知らせる（2026-10-04 に発生）。
+   */
   function call(fn) {
     var args = Array.prototype.slice.call(arguments, 1);
     return new Promise(function (resolve, reject) {
       var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+      if (typeof runner[fn] !== "function") {
+        reject(new Error(
+          "サーバー側に「" + fn + "」がありません\n" +
+            "　→ Apps Script の コード.gs を最新にして保存し、新しいバージョンでデプロイしてください"
+        ));
+        return;
+      }
       runner[fn].apply(runner, args);
     });
   }
@@ -648,6 +760,249 @@
     if (cls) node.className = cls;
     if (text !== undefined) node.textContent = text;
     return node;
+  }
+
+  // ---------- 画面の切り替え（検索／集計） ----------
+
+  function switchTab(name) {
+    var isSummary = name === "summary";
+    $("tabSearch").setAttribute("aria-selected", String(!isSummary));
+    $("tabSummary").setAttribute("aria-selected", String(isSummary));
+    $("layout").hidden = isSummary;
+    $("summaryView").hidden = !isSummary;
+    // 「条件を隠す」は検索画面だけのもの
+    $("toggleButton").hidden = isSummary;
+    if (isSummary && !summaryData) loadSummary();
+  }
+  $("tabSearch").addEventListener("click", function () { switchTab("search"); });
+  $("tabSummary").addEventListener("click", function () { switchTab("summary"); });
+
+  // ---------- 集計 ----------
+  // 配送方法ごとに集計する。ネコポスはソフト中心で短く、宅急便は本体セット中心で長い。
+  // 混ぜると、ネコポスを多く担当した人ほど速く見え、比較が成り立たない（2026-10-04 に実データで確認）。
+
+  var summaryData = null;
+  var summaryCarrier = null;
+  var summaryWorker = null;
+
+  $("period").addEventListener("change", loadSummary);
+
+  function loadSummary() {
+    var body = $("summaryBody");
+    $("summaryError").textContent = "";
+    body.textContent = "";
+    body.appendChild(el("div", "empty", "集計しています…"));
+
+    call("summarize", getToken(), $("period").value)
+      .then(renderSummary)
+      .catch(function (err) {
+        if (isAuthError(err)) { showLogin(err.message); return; }
+        body.textContent = "";
+        $("summaryError").textContent = err.message;
+      });
+  }
+
+  function renderSummary(data) {
+    summaryData = data;
+    var body = $("summaryBody");
+    body.textContent = "";
+    $("summaryRange").textContent = shortDate(data.from) + "〜" + shortDate(data.to);
+
+    if (!data.carriers.length) {
+      body.appendChild(el("div", "empty", "この期間の記録はありません。期間を変えてください"));
+      return;
+    }
+
+    // 配送方法ごとの全体の値を並べる
+    var tiles = el("div", "tiles");
+    data.carriers.forEach(function (c) {
+      var tile = el("div", "tile");
+      tile.appendChild(el("h2", "", c.carrier));
+      tile.appendChild(el("span", "label", "1件あたり（中央値）"));
+      tile.appendChild(el("span", "median", c.medianSec != null ? formatDuration(c.medianSec) : "—"));
+      var meta = el("div", "meta", c.count + "件　");
+      meta.appendChild(c.longCount > 0
+        ? el("span", "long-text", "20分以上 " + c.longCount + "件")
+        : document.createTextNode("20分以上 0件"));
+      tile.appendChild(meta);
+      tiles.appendChild(tile);
+    });
+    body.appendChild(tiles);
+
+    var t = findCarrier("宅急便"), n = findCarrier("ネコポス");
+    if (t && n && t.medianSec && n.medianSec) {
+      body.appendChild(el("p", "ratio",
+        "宅急便の1件あたりは、ネコポスの約" + (t.medianSec / n.medianSec).toFixed(1) + "倍です"));
+    }
+
+    // 担当者の表は配送方法ごとに切り替える。「すべて」は作らない（混ぜた比較は誤解のもとになるため）
+    if (!findCarrier(summaryCarrier)) summaryCarrier = data.carriers[0].carrier;
+    var seg = el("div", "segment");
+    seg.setAttribute("role", "group");
+    seg.setAttribute("aria-label", "配送方法");
+    data.carriers.forEach(function (c) {
+      var b = el("button", "", c.carrier);
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(c.carrier === summaryCarrier));
+      b.addEventListener("click", function () {
+        summaryCarrier = c.carrier;
+        summaryWorker = null;
+        renderSummary(summaryData);
+      });
+      seg.appendChild(b);
+    });
+    body.appendChild(seg);
+
+    body.appendChild(workerTable(findCarrier(summaryCarrier)));
+
+    var c = findCarrier(summaryCarrier);
+    var w = c.workers.filter(function (x) { return x.name === summaryWorker; })[0] || c.workers[0];
+    if (w) {
+      summaryWorker = w.name;
+      body.appendChild(trendCard(w, c.carrier));
+    }
+
+    body.appendChild(el("p", "caution",
+      "1件あたりの時間は、何を梱包したかで変わります。人どうしの差には、担当した伝票の中身の違いも含まれます。" +
+      "中央値は20分以上の伝票を除いて計算しています（20分以上は件数だけ数えています）。"));
+  }
+
+  function findCarrier(name) {
+    if (!summaryData) return null;
+    return summaryData.carriers.filter(function (c) { return c.carrier === name; })[0] || null;
+  }
+
+  function workerTable(c) {
+    var sheet = el("div", "sheet");
+    var table = el("table", "workers");
+    var thead = el("thead");
+    var hr = el("tr");
+    [["担当", ""], ["件数", "num"], ["1件あたり（中央値）", "num"], ["20分以上", "num"]]
+      .forEach(function (h) { hr.appendChild(el("th", h[1], h[0])); });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    var tbody = el("tbody");
+    c.workers.forEach(function (w) {
+      var tr = el("tr", w.name === summaryWorker ? "selected" : "");
+      var nameCell = el("td");
+      var btn = el("button", "worker-btn", w.name);
+      btn.type = "button";
+      btn.setAttribute("aria-label", w.name + "さんの推移を見る");
+      nameCell.appendChild(btn);
+      tr.appendChild(nameCell);
+      tr.appendChild(el("td", "num", w.count + "件"));
+      tr.appendChild(el("td", "num", w.medianSec != null ? formatDuration(w.medianSec) : "—"));
+      tr.appendChild(el("td", "num" + (w.longCount > 0 ? " long-text" : ""), w.longCount + "件"));
+      tr.addEventListener("click", function () {
+        summaryWorker = w.name;
+        renderSummary(summaryData);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    sheet.appendChild(table);
+    return sheet;
+  }
+
+  /**
+   * 選んだ人の週ごとの推移。棒＝件数（右の目盛り）、折れ線＝1件あたりの中央値（左の目盛り）。
+   * 外部のグラフ部品は使わず、SVG を直接組む（読み込みの失敗や仕様変更に左右されないように）。
+   */
+  function trendCard(w, carrier) {
+    var card = el("div", "chart-card");
+    card.appendChild(el("h3", "", w.name + "さんの推移（" + carrier + "・週ごと）"));
+
+    var legend = el("div", "legend");
+    var l1 = el("span"); var s1 = el("span", "swatch"); s1.style.background = "#9fd3f7";
+    l1.appendChild(s1); l1.appendChild(document.createTextNode("件数（右の目盛り）"));
+    var l2 = el("span"); var s2 = el("span", "swatch"); s2.style.background = "#004d94";
+    l2.appendChild(s2); l2.appendChild(document.createTextNode("1件あたりの中央値（左の目盛り）"));
+    legend.appendChild(l1); legend.appendChild(l2);
+    card.appendChild(legend);
+
+    card.appendChild(drawChart(w.weeks));
+    if (w.weeks.length < 2) {
+      card.appendChild(el("p", "caution", "まだ1週分の記録しかありません。週を重ねると変化が見えてきます。"));
+    }
+    return card;
+  }
+
+  function drawChart(weeks) {
+    var NS = "http://www.w3.org/2000/svg";
+    var W = 760, H = 260, L = 64, R = 52, T = 16, B = 40;
+    var pw = W - L - R, ph = H - T - B;
+
+    function node(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text !== undefined) n.textContent = text;
+      return n;
+    }
+
+    var svg = node("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "週ごとの件数と1件あたりの中央値" });
+
+    // 目盛りの上限を切りのよい値にする
+    var maxCount = Math.max.apply(null, weeks.map(function (x) { return x.count; }).concat([1]));
+    var countTop = niceTop(maxCount);
+    var meds = weeks.map(function (x) { return x.medianSec; }).filter(function (v) { return v != null; });
+    var maxMed = Math.max.apply(null, meds.concat([60]));
+    var medTop = Math.ceil(maxMed / 60) * 60; // 分単位で切り上げ
+
+    // 横線と左右の目盛り（4本）
+    for (var i = 0; i <= 4; i++) {
+      var y = T + ph - (ph * i) / 4;
+      svg.appendChild(node("line", { x1: L, x2: L + pw, y1: y, y2: y, stroke: "#e3e8ec" }));
+      svg.appendChild(node("text", { x: L - 8, y: y + 4, "text-anchor": "end", "font-size": 12, fill: "#888888" },
+        formatAxisMinutes((medTop * i) / 4)));
+      svg.appendChild(node("text", { x: L + pw + 8, y: y + 4, "text-anchor": "start", "font-size": 12, fill: "#888888" },
+        Math.round((countTop * i) / 4) + "件"));
+    }
+
+    var band = pw / Math.max(weeks.length, 1);
+    var barW = Math.min(band * 0.5, 48);
+    var points = [];
+
+    weeks.forEach(function (wk, idx) {
+      var cx = L + band * idx + band / 2;
+      var bh = (ph * wk.count) / countTop;
+      svg.appendChild(node("rect", {
+        x: cx - barW / 2, y: T + ph - bh, width: barW, height: bh, rx: 4, fill: "#9fd3f7",
+      }));
+      svg.appendChild(node("text", { x: cx, y: H - B + 20, "text-anchor": "middle", "font-size": 12, fill: "#666666" },
+        Number(wk.week.substring(5, 7)) + "/" + Number(wk.week.substring(8, 10)) + "〜"));
+      if (wk.medianSec != null) {
+        points.push([cx, T + ph - (ph * wk.medianSec) / medTop, wk.medianSec]);
+      }
+    });
+
+    if (points.length > 1) {
+      svg.appendChild(node("polyline", {
+        points: points.map(function (p) { return p[0] + "," + p[1]; }).join(" "),
+        fill: "none", stroke: "#004d94", "stroke-width": 2.5,
+      }));
+    }
+    points.forEach(function (p) {
+      svg.appendChild(node("circle", { cx: p[0], cy: p[1], r: 5, fill: "#004d94" }));
+      svg.appendChild(node("text", { x: p[0], y: p[1] - 10, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "#004d94" },
+        formatDuration(p[2])));
+    });
+
+    return svg;
+  }
+
+  /** 件数の目盛りの上限（切りのよい値に切り上げ） */
+  function niceTop(v) {
+    var steps = [4, 8, 12, 20, 40, 60, 100, 200, 400, 1000];
+    for (var i = 0; i < steps.length; i++) if (v <= steps[i]) return steps[i];
+    return Math.ceil(v / 1000) * 1000;
+  }
+
+  /** 秒 → 目盛りの表記（0分、1分30秒、3分） */
+  function formatAxisMinutes(sec) {
+    var m = Math.floor(sec / 60), s = Math.round(sec % 60);
+    if (s === 0) return m + "分";
+    return m > 0 ? m + "分" + s + "秒" : s + "秒";
   }
 
   // ---------- 起動 ----------
