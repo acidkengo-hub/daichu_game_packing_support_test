@@ -258,6 +258,50 @@
   .day-chip[aria-pressed="true"] .n { color: #fff; }
   .month-label { margin-left: 4px; font-size: 13px; font-weight: 700; color: var(--text-sub); }
 
+  /*
+   * 担当者ごとの色の帯（行の左端だけ）。行全体を塗らないのは、
+   * 20分以上の赤字や取り消しの灰色と重なって見づらくなるため（2026-10-05）。
+   */
+  td.worker { box-shadow: inset 5px 0 0 var(--band, transparent); padding-left: 20px; }
+
+  /* 作業の最初と最後の伝票の印 */
+  .mark {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 0 8px;
+    border: 1px solid var(--text-muted);
+    border-radius: 100px;
+    color: var(--text-sub);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.7;
+  }
+  .mark.end { border-color: var(--navy); color: var(--navy); }
+  .mark.live { border-color: var(--blue); background: var(--blue); color: #fff; }
+  /* 最初の伝票の所要時間は、準備の時間を含むことがあるので控えめに出す */
+  td.duration.first { color: var(--text-muted); font-weight: 500; }
+
+  /* 並び替えの切り替え（時刻順／担当者ごと） */
+  .sort-switch {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 100px;
+    background: var(--surface);
+  }
+  .sort-switch button {
+    min-height: 32px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 100px;
+    background: none;
+    color: var(--text-sub);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .sort-switch button[aria-pressed="true"] { background: var(--navy); color: #fff; font-weight: 700; }
+
   tr.cancelled td { color: var(--text-muted); }
   tr.cancelled td.duration { text-decoration: line-through; }
   .tag {
@@ -553,6 +597,24 @@
   var dayList = [];         // 作業日（古い順）
   var dayCache = {};        // date → その日の伝票（1日分を取り直したもの）
   var truncatedAll = false; // 「すべて」の表が上限で打ち切られているか
+  var sortMode = "time";    // "time"（時刻順） / "worker"（担当者ごと）
+  var workerOrder = {};     // 担当者 → 並び順（その結果の中で、先に作業を始めた順）
+  var workerColor = {};     // 担当者 → 色の帯の色
+
+  /**
+   * 担当者ごとの色。二人以上が同時に作業しても、誰の伝票かを目で追えるようにする。
+   * 赤（20分以上・取り消しに使う）は避ける。
+   */
+  /** 終わりの印にマウスを乗せたときの説明。作業記録シートの「終わり方」と同じ言葉 */
+  var END_MARK_TITLES = {
+    "担当終了": "ここで担当終了を押しました（伝票が残っていても、自分の担当分を終えた）",
+    "交替": "ここで別の人に交替しました",
+    "全完了": "ここでこの配送方法の伝票をすべて梱包し終えました",
+    "自動終了": "120分操作がなかったため、ここで記録が自動で閉じられました",
+    "作業中": "まだ担当終了していません（作業中）",
+  };
+
+  var BAND_COLORS = ["#0984e3", "#fb8600", "#0cb7b7", "#8e5cd9", "#bca47a", "#2e9e5b", "#d6589b", "#5d6b7a"];
 
   function readQuery() {
     return {
@@ -653,6 +715,8 @@
 
     var groups = groupRows(result.rows);
     lastGroups = groups;
+    sortMode = "time";
+    assignWorkers(groups);
 
     // 作業日の一覧。古いサーバー（days を返さない版）なら、手元の伝票から作る
     dayInfo = {};
@@ -697,6 +761,7 @@
     }
 
     main.appendChild(dayChips());
+    main.appendChild(sortSwitch());
 
     var notice = el("div", "notice");
     notice.id = "truncNotice";
@@ -719,6 +784,50 @@
     main.appendChild(sheet);
 
     fillRows();
+  }
+
+  /** あとから見つかった担当者に色と並び順を足す */
+  function assignExtra(name) {
+    var n = Object.keys(workerOrder).length;
+    workerOrder[name] = n;
+    workerColor[name] = BAND_COLORS[n % BAND_COLORS.length];
+  }
+
+  /** 担当者ごとの色と並び順を決める。その結果の中で、先に作業を始めた人から順に */
+  function assignWorkers(groups) {
+    workerOrder = {};
+    workerColor = {};
+    var n = 0;
+    groups.forEach(function (g) {
+      var name = g.head.worker;
+      if (!(name in workerOrder)) {
+        workerOrder[name] = n;
+        workerColor[name] = BAND_COLORS[n % BAND_COLORS.length];
+        n++;
+      }
+    });
+  }
+
+  /** 並び替えの切り替え。「担当者ごと」は、先に作業を始めた人から順に、その中は古い順 */
+  function sortSwitch() {
+    var box = el("div", "sort-switch");
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", "並び順");
+    box.style.marginBottom = "12px";
+    var buttons = [];
+    [["time", "時刻順"], ["worker", "担当者ごと"]].forEach(function (o) {
+      var b = el("button", "", o[1]);
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(sortMode === o[0]));
+      b.addEventListener("click", function () {
+        sortMode = o[0];
+        buttons.forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+        fillRows();
+      });
+      buttons.push(b);
+      box.appendChild(b);
+    });
+    return box;
   }
 
   /** 期間内の伝票の合計件数と20分以上の合計件数（サーバーが最後まで数えた値） */
@@ -774,9 +883,14 @@
     return m + "/" + day + "(" + w + ")";
   }
 
-  /** 20分以上の伝票か。取り消しになった伝票は、やり直す前の時間なので数えない */
+  /**
+   * 20分以上の伝票か。次の伝票は数えない。
+   * - 取り消しになった伝票（やり直す前の時間なので）
+   * - 作業の最初の伝票（ピッキングや準備の時間を含むことがあるので。2026-10-05）
+   * サーバー側（Code.gs）の数え方と同じにすること。
+   */
   function isLong(g) {
-    return !g.head.cancelled && g.durationSec != null && g.durationSec >= LONG_SEC;
+    return !g.head.cancelled && !g.head.isFirst && g.durationSec != null && g.durationSec >= LONG_SEC;
   }
 
   /**
@@ -857,18 +971,53 @@
         "それより前の日は、日付のボタンを押すと、その日の記録をすべて表示します";
     }
 
+    var shown = groups.filter(function (g) { return !onlyLong || isLong(g); });
+    if (sortMode === "worker") {
+      // 担当者ごと（先に作業を始めた人から）。同じ人の中は古い順のまま
+      shown = shown
+        .map(function (g, i) { return { g: g, i: i }; })
+        .sort(function (a, b) {
+          var wa = workerOrder[a.g.head.worker], wb = workerOrder[b.g.head.worker];
+          return wa !== wb ? wa - wb : a.i - b.i;
+        })
+        .map(function (x) { return x.g; });
+    }
+
     tbody.textContent = "";
-    groups
-      .filter(function (g) { return !onlyLong || isLong(g); })
-      .forEach(function (g) { tbody.appendChild(slipRow(g)); });
+    shown.forEach(function (g) { tbody.appendChild(slipRow(g)); });
   }
 
   function slipRow(g) {
     var h = g.head;
     var tr = el("tr", h.cancelled ? "cancelled" : "");
 
-    // 担当
+    // 担当。左端に担当者ごとの色の帯、下に「開始」「終了」「取り消し」の印
     var worker = el("td", "worker", h.worker);
+    var color = workerColor[h.worker];
+    if (!color) {
+      // 1日分を取り直した伝票に、最初の結果にいなかった人がいた場合
+      assignExtra(h.worker);
+      color = workerColor[h.worker];
+    }
+    worker.style.setProperty("--band", color);
+    // 印はサーバーが作業記録シートの「終わり方」と照らし合わせて決めたもの。
+    // 古いサーバー（isFirst / isLast だけを返す版）にも合わせる
+    var startMark = h.startMark || (h.isFirst ? "開始" : "");
+    var endMark = h.endMark || (h.isLast ? "終了" : "");
+    if (startMark) {
+      worker.appendChild(document.createElement("br"));
+      var m1 = el("span", "mark", startMark);
+      m1.title = startMark === "再開"
+        ? "担当終了の後に戻ってきた、1件目の伝票です"
+        : "この人の、この日・この配送方法での最初の伝票です";
+      worker.appendChild(m1);
+    }
+    if (endMark) {
+      worker.appendChild(document.createElement("br"));
+      var m2 = el("span", endMark === "作業中" ? "mark live" : "mark end", endMark);
+      m2.title = END_MARK_TITLES[endMark] || "";
+      worker.appendChild(m2);
+    }
     if (h.cancelled) {
       worker.appendChild(document.createElement("br"));
       worker.appendChild(el("span", "tag", "取り消し"));
@@ -881,9 +1030,14 @@
     when.appendChild(el("span", "sub", h.bin + " " + h.carrier));
     tr.appendChild(when);
 
-    // 所要。同梱の伝票は、まとめたときに拾った値を使う
-    tr.appendChild(el("td", "duration" + (isLong(g) ? " long" : ""),
-      g.durationSec != null ? formatDuration(g.durationSec) : "—"));
+    // 所要。同梱の伝票は、まとめたときに拾った値を使う。
+    // 最初の伝票は、ピッキングや準備の時間を含むことがあるので控えめに出す
+    var dur = el("td", "duration" + (isLong(g) ? " long" : "") + (h.isFirst ? " first" : ""),
+      g.durationSec != null ? formatDuration(g.durationSec) : "—");
+    if (h.isFirst) {
+      dur.title = "作業の最初（開始・再開）の伝票は、ピッキングや準備の時間を含むことがあるため、20分以上には数えません";
+    }
+    tr.appendChild(dur);
 
     // 商品（同梱は1行ずつ）
     var products = el("td", "products");
@@ -1049,7 +1203,8 @@
 
     body.appendChild(el("p", "caution",
       "1件あたりの時間は、何を梱包したかで変わります。人どうしの差には、担当した伝票の中身の違いも含まれます。" +
-      "中央値は20分以上の伝票を除いて計算しています（20分以上は件数だけ数えています）。"));
+      "中央値は20分以上の伝票を除いて計算しています（20分以上は件数だけ数えています）。" +
+      "各担当の作業の最初の伝票（開始・担当終了後の再開）は、ピッキングや準備の時間を含むことがあるため、中央値と20分以上から外しています（件数には入っています）。"));
   }
 
   function findCarrier(name) {

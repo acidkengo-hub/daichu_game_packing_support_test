@@ -68,6 +68,14 @@ var SLIP = {
 };
 var SLIP_WIDTH = 12;
 
+/**
+ * 作業記録シートの列（1始まり）。梱包ツール用 GAS の HEADER_WORK と同じ並び。
+ * 「終わり方」には、その回の最後の伝票の完了時刻が入る
+ * （例：担当終了(12:43:11)→全完了(13:10:00)）。
+ */
+var WORK = { DATE: 1, BIN: 2, CARRIER: 3, WORKER: 4, ENDING: 11 };
+var WORK_WIDTH = 11;
+
 // ===== 入口 =====
 
 function doGet() {
@@ -158,6 +166,7 @@ function searchSlips(token, query) {
 
   var range = resolveRange_(query.from, query.to);
   var ss = openBook_();
+  var endings = readEndings_(ss, range.months, range.from, range.to);
   var rows = [];
   var truncated = false;
   var days = {};   // date → { slips: {伝票のキー: true}, count, longCount }
@@ -172,6 +181,8 @@ function searchSlips(token, query) {
     if (last < 2) continue;
 
     var values = sheet.getRange(2, 1, last - 1, SLIP_WIDTH).getValues();
+    // 作業の最初と最後の伝票は、絞り込む前の全部の伝票で決める
+    var bounds = sessionBounds_(values, range.from, range.to, endings);
 
     for (var i = values.length - 1; i >= 0; i--) {
       var r = values[i];
@@ -187,6 +198,10 @@ function searchSlips(token, query) {
       var receiveId = String(r[SLIP.RECEIVE_ID - 1]);
       var durRaw = r[SLIP.DURATION - 1];
       var cancelled = String(r[SLIP.CANCEL - 1]) === "取り消し";
+      var markKey = sessionKey_(r, date) + "|" + doneAt;
+      var startMark = bounds.start[markKey] || "";
+      var endMark = bounds.end[markKey] || "";
+      var isFirst = startMark !== "";   // 開始・再開。20分以上と中央値から外す
 
       // 作業日ごとの件数。同梱の伝票は複数行あるので、画面と同じキーで1件に数える
       var d = days[date] || (days[date] = { slips: {}, count: 0, longCount: 0 });
@@ -195,8 +210,9 @@ function searchSlips(token, query) {
         d.slips[slipKey] = true;
         d.count++;
       }
-      // 20分以上は、所要時間の入っている行（同梱の1行目）で数える。取り消しは数えない
-      if (durRaw !== "" && durRaw !== null && !cancelled && Number(durRaw) >= LONG_SEC) {
+      // 20分以上は、所要時間の入っている行（同梱の1行目）で数える。
+      // 取り消しと、作業の最初の伝票（準備の時間を含むことがある）は数えない
+      if (durRaw !== "" && durRaw !== null && !cancelled && !isFirst && Number(durRaw) >= LONG_SEC) {
         d.longCount++;
       }
 
@@ -222,6 +238,9 @@ function searchSlips(token, query) {
         durationSec: durRaw === "" ? null : Number(durRaw),
         cancelled: cancelled,
         receiveId: receiveId,
+        isFirst: isFirst,       // 開始・再開の伝票（20分以上と中央値から外す）
+        startMark: startMark,   // "開始" / "再開" / ""
+        endMark: endMark,       // "担当終了" / "交替" / "全完了" / "自動終了" / "作業中" / 
       });
     }
   }
@@ -259,6 +278,8 @@ function listWorkers(token) {
  *   - 所要時間の入っている行だけを数える（同梱の伝票は1行目にだけ入っている）
  *   - 取り消しになった伝票は外す（やり直す前の時間のため）
  *   - 件数には20分以上も含める。中央値は20分以上を外して計算する
+ *   - 開始・再開の伝票は、件数には入れるが、中央値と20分以上からは外す
+ *     （ピッキングや準備の時間を含むことがあるため。sessionBounds_ を参照）
  *
  * ⚠️ 1件あたりの時間は、何を梱包したかで大きく変わる。
  * 人どうしの差は「腕前の差」ではなく「担当分の中身の差」を含む。
@@ -273,12 +294,14 @@ function summarize(token, period) {
   requireToken_(token);
 
   var range = periodRange_(period);
-  var cacheKey = "sum2_" + range.from + "_" + range.to;
+  // 数え方を変えたら名前も変える（古い形の結果が5分間残っていて、取り違えないように）
+  var cacheKey = "sum4_" + range.from + "_" + range.to;
   var cache = CacheService.getScriptCache();
   var cached = cache.get(cacheKey);
   if (cached) return JSON.parse(cached);
 
   var ss = openBook_();
+  var endings = readEndings_(ss, range.months, range.from, range.to);
   var byCarrier = {};
 
   for (var m = 0; m < range.months.length; m++) {
@@ -288,6 +311,7 @@ function summarize(token, period) {
     if (last < 2) continue;
 
     var values = sheet.getRange(2, 1, last - 1, SLIP_WIDTH).getValues();
+    var bounds = sessionBounds_(values, range.from, range.to, endings);
     for (var i = 0; i < values.length; i++) {
       var r = values[i];
       var dur = r[SLIP.DURATION - 1];
@@ -309,9 +333,11 @@ function summarize(token, period) {
       var week = weekStart_(date);
       var wk = w.weeks[week] || (w.weeks[week] = newBucket_());
 
-      addSec_(c, sec);
-      addSec_(w, sec);
-      addSec_(wk, sec);
+      // 開始・再開の伝票は、件数には入れるが、中央値と20分以上からは外す
+      var first = !!bounds.start[sessionKey_(r, date) + "|" + cellText_(r[SLIP.DONE_AT - 1], "HH:mm:ss")];
+      addSec_(c, sec, first);
+      addSec_(w, sec, first);
+      addSec_(wk, sec, first);
     }
   }
 
@@ -350,14 +376,118 @@ function summarize(token, period) {
   return result;
 }
 
+/**
+ * 作業のまとまり（同じ日・便・配送方法・担当者）ごとに、
+ * 伝票に付ける「始まり」と「終わり」の印を決める。
+ *
+ * 始まりの印（startMark）:
+ *   "開始" … その日の最初の伝票
+ *   "再開" … 担当終了・自動終了の次の伝票（戻ってきた後の1件目）
+ *   どちらも、ピッキングや伝票一覧を見ながらの準備の時間を含むことがある
+ *   （2026-10-05 に実データで確認。ピッキングを12秒で飛ばした後、1件目が42分48秒）。
+ *   そこで「20分以上」の件数と中央値から外す。件数には入れる。
+ *
+ * 終わりの印（endMark）:
+ *   "担当終了" / "交替" / "全完了" / "自動終了"
+ *       … 作業記録シートの「終わり方」に書かれた時刻と、完了時刻が同じ伝票
+ *   "作業中" … 終わり方が空欄のまま、今日の最後の伝票
+ *
+ * 商品名などで絞り込む前の、期間内の全部の伝票を見て決める。
+ * 絞り込んだ後で決めると、絞り込んだ中の最初を取り違えるため。
+ *
+ * endings: readEndings_ の返り値（まとまりのキー → [{kind, time}]）
+ * 返り値: { start: {キー|時刻: "開始"/"再開"}, end: {キー|時刻: 印} }
+ */
+function sessionBounds_(values, from, to, endings) {
+  // まとまりごとに、伝票の完了時刻（同梱は1行目で数える）を集める
+  var times = {};
+  for (var i = 0; i < values.length; i++) {
+    var r = values[i];
+    var dur = r[SLIP.DURATION - 1];
+    if (dur === "" || dur === null) continue;
+    var date = cellText_(r[SLIP.DATE - 1], "yyyy-MM-dd");
+    if (date < from || date > to) continue;
+    var key = sessionKey_(r, date);
+    (times[key] || (times[key] = [])).push(cellText_(r[SLIP.DONE_AT - 1], "HH:mm:ss"));
+  }
+
+  var today = Utilities.formatDate(new Date(), tz_(), "yyyy-MM-dd");
+  var start = {}, end = {};
+
+  Object.keys(times).forEach(function (key) {
+    var ts = times[key].sort();
+    var list = (endings && endings[key]) || [];
+
+    start[key + "|" + ts[0]] = "開始";
+
+    list.forEach(function (e) {
+      end[key + "|" + e.time] = e.kind;
+      // 担当終了・自動終了の後に、同じまとまりで作業を再開した1件目
+      if (e.kind === "担当終了" || e.kind === "自動終了") {
+        for (var j = 0; j < ts.length; j++) {
+          if (ts[j] > e.time) {
+            if (!start[key + "|" + ts[j]]) start[key + "|" + ts[j]] = "再開";
+            break;
+          }
+        }
+      }
+    });
+
+    // 終わり方が空欄のまま、今日の最後の伝票は「作業中」
+    var lastT = ts[ts.length - 1];
+    var lastClosed = list.some(function (e) { return e.time >= lastT; });
+    if (!lastClosed && key.substring(0, 10) === today) {
+      end[key + "|" + lastT] = "作業中";
+    }
+  });
+
+  return { start: start, end: end };
+}
+
+/**
+ * 作業記録シートの「終わり方」を読み、まとまりごとの終わり方の一覧を返す。
+ * 例：担当終了(12:43:11)→全完了(13:10:00)
+ *   → [{kind:"担当終了", time:"12:43:11"}, {kind:"全完了", time:"13:10:00"}]
+ */
+function readEndings_(ss, months, from, to) {
+  var map = {};
+  months.forEach(function (month) {
+    var sheet = ss.getSheetByName("作業記録_" + month);
+    if (!sheet) return;
+    var last = sheet.getLastRow();
+    if (last < 2) return;
+    var values = sheet.getRange(2, 1, last - 1, WORK_WIDTH).getValues();
+    values.forEach(function (r) {
+      var date = cellText_(r[WORK.DATE - 1], "yyyy-MM-dd");
+      if (date < from || date > to) return;
+      var key = [date, r[WORK.BIN - 1], r[WORK.CARRIER - 1], String(r[WORK.WORKER - 1]).trim()].join("|");
+      var text = String(r[WORK.ENDING - 1] || "");
+      var re = /([^→()]+)\((\d{2}:\d{2}:\d{2})\)/g;
+      var m, list = [];
+      while ((m = re.exec(text)) !== null) list.push({ kind: m[1].trim(), time: m[2] });
+      map[key] = list;
+    });
+  });
+  return map;
+}
+
+/** 作業のまとまりのキー（作業記録シートの1行と同じ単位） */
+function sessionKey_(r, date) {
+  return [date, r[SLIP.BIN - 1], r[SLIP.CARRIER - 1], String(r[SLIP.WORKER - 1]).trim()].join("|");
+}
+
 /** 集計の入れ物 */
 function newBucket_() {
   return { count: 0, long: 0, secs: [] };
 }
 
-/** 1件分を入れる。20分以上は件数だけ数え、中央値には入れない */
-function addSec_(bucket, sec) {
+/**
+ * 1件分を入れる。20分以上は件数だけ数え、中央値には入れない。
+ * 作業の最初の伝票（first）は件数だけ数え、20分以上にも中央値にも入れない。
+ */
+function addSec_(bucket, sec, first) {
   bucket.count++;
+  if (first) return;
   if (sec >= LONG_SEC) bucket.long++;
   else bucket.secs.push(sec);
 }
