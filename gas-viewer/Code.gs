@@ -11,8 +11,8 @@
  *   - 記録を返す関数は、すべて最初にトークンを確かめる
  *
  * 【画面から呼べる関数】
- *   login / searchSlips / listWorkers / summarize の4つだけ
- *   （＋何も返さない debugSearch / debugSummary）。
+ *   login / searchSlips / listWorkers / summarize / dailyReport の5つだけ
+ *   （＋何も返さない debugSearch / debugSummary / debugDailyReport）。
  *   補助関数は名前の末尾に「_」を付け、画面から呼べないようにしている。
  *
  * 【書き込まない】
@@ -73,7 +73,7 @@ var SLIP_WIDTH = 12;
  * 「終わり方」には、その回の最後の伝票の完了時刻が入る
  * （例：担当終了(12:43:11)→全完了(13:10:00)）。
  */
-var WORK = { DATE: 1, BIN: 2, CARRIER: 3, WORKER: 4, ENDING: 11 };
+var WORK = { DATE: 1, BIN: 2, CARRIER: 3, WORKER: 4, START: 5, END: 6, COUNT: 7, MINUTES: 8, ENDING: 11 };
 var WORK_WIDTH = 11;
 
 // ===== 入口 =====
@@ -492,6 +492,167 @@ function addSec_(bucket, sec, first) {
   else bucket.secs.push(sec);
 }
 
+// ===== 日報 =====
+
+/**
+ * 1日分の日報の数字をまとめて返す。文章に整えるのは画面側（Index.html）。
+ * Asana への日報に貼る文章を作るために使う（2026-10-05 社員さんの要望）。
+ *
+ * date: yyyy-MM-dd
+ *
+ * 数え方は集計画面と同じ:
+ *   - 1件あたりは中央値。開始・再開の伝票と20分以上は外す
+ *   - 取り消しになった伝票は数えない
+ *   - 「1日の合計」「担当者ごとの合計」の1件あたりは、午前と午後の伝票を
+ *     まとめて取り直す（便ごとの中央値を平均すると、件数の違いが反映されないため）
+ *   - 作業時間は作業記録シートの「作業時間(分)」（中断していた時間を含まない）
+ *
+ * 返り値:
+ *   { date,
+ *     bins:    [ { bin, carriers: [{carrier, count, longCount, medianSec}],
+ *                  lines: [{worker, carrier, count, start, end, minutes, ending}] } ],
+ *     total:   { carriers: [{carrier, count, longCount, medianSec}], longCount },
+ *     persons: [ { name, carriers: [{carrier, count, medianSec}], minutes, minutesByBin: {便: 分} } ],
+ *     health:  { slipCount, workCount, missingOrderNo, openEndings: [{worker, bin, carrier}] } }
+ */
+function dailyReport(token, date) {
+  requireToken_(token);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(norm_(date))) {
+    throw new Error("日付を選んでください");
+  }
+  date = norm_(date);
+  var month = date.substring(0, 7);
+  var ss = openBook_();
+  var endings = readEndings_(ss, [month], date, date);
+
+  // ---- 伝票 ----
+  var slipSheet = ss.getSheetByName("伝票_" + month);
+  var slipValues = [];
+  if (slipSheet && slipSheet.getLastRow() >= 2) {
+    slipValues = slipSheet.getRange(2, 1, slipSheet.getLastRow() - 1, SLIP_WIDTH).getValues();
+  }
+  var bounds = sessionBounds_(slipValues, date, date, endings);
+
+  var binBuckets = {};     // 便 → 配送方法 → 入れ物
+  var totalBuckets = {};   // 配送方法 → 入れ物
+  var personBuckets = {};  // 担当者 → 配送方法 → 入れ物
+  var slipCount = 0;
+  var missingOrderNo = 0;
+
+  slipValues.forEach(function (r) {
+    var dur = r[SLIP.DURATION - 1];
+    if (dur === "" || dur === null) return;                   // 同梱の2行目以降
+    if (String(r[SLIP.CANCEL - 1]) === "取り消し") return;
+    var d = cellText_(r[SLIP.DATE - 1], "yyyy-MM-dd");
+    if (d !== date) return;
+
+    var bin = String(r[SLIP.BIN - 1]).trim();
+    var carrier = String(r[SLIP.CARRIER - 1]).trim();
+    var name = String(r[SLIP.WORKER - 1]).trim();
+    var doneAt = cellText_(r[SLIP.DONE_AT - 1], "HH:mm:ss");
+    var first = !!bounds.start[sessionKey_(r, d) + "|" + doneAt];
+    var sec = Number(dur);
+
+    slipCount++;
+    if (!String(r[SLIP.SHOP_ORDER - 1] || "").trim()) missingOrderNo++;
+
+    var b = binBuckets[bin] || (binBuckets[bin] = {});
+    addSec_(b[carrier] || (b[carrier] = newBucket_()), sec, first);
+    addSec_(totalBuckets[carrier] || (totalBuckets[carrier] = newBucket_()), sec, first);
+    var p = personBuckets[name] || (personBuckets[name] = {});
+    addSec_(p[carrier] || (p[carrier] = newBucket_()), sec, first);
+  });
+
+  // ---- 作業記録 ----
+  var workSheet = ss.getSheetByName("作業記録_" + month);
+  var lines = {};          // 便 → [行]
+  var minutesByPerson = {}; // 担当者 → 便 → 分
+  var workCount = 0;
+  var openEndings = [];
+  if (workSheet && workSheet.getLastRow() >= 2) {
+    workSheet.getRange(2, 1, workSheet.getLastRow() - 1, WORK_WIDTH).getValues().forEach(function (r) {
+      if (cellText_(r[WORK.DATE - 1], "yyyy-MM-dd") !== date) return;
+      var bin = String(r[WORK.BIN - 1]).trim();
+      var carrier = String(r[WORK.CARRIER - 1]).trim();
+      var name = String(r[WORK.WORKER - 1]).trim();
+      var minutes = Number(r[WORK.MINUTES - 1]) || 0;
+      var key = [date, bin, carrier, name].join("|");
+      var list = endings[key] || [];
+      var ending = list.length ? list[list.length - 1].kind : "";
+
+      workCount += Number(r[WORK.COUNT - 1]) || 0;
+      if (!ending) openEndings.push({ worker: name, bin: bin, carrier: carrier });
+
+      (lines[bin] || (lines[bin] = [])).push({
+        worker: name,
+        carrier: carrier,
+        count: Number(r[WORK.COUNT - 1]) || 0,
+        start: cellText_(r[WORK.START - 1], "HH:mm:ss"),
+        end: cellText_(r[WORK.END - 1], "HH:mm:ss"),
+        minutes: minutes,
+        ending: ending,
+      });
+      var m = minutesByPerson[name] || (minutesByPerson[name] = {});
+      m[bin] = (m[bin] || 0) + minutes;
+    });
+  }
+
+  // ---- まとめる ----
+  function carrierList(buckets) {
+    return sortCarriers_(Object.keys(buckets)).map(function (c) {
+      var x = buckets[c];
+      return { carrier: c, count: x.count, longCount: x.long, medianSec: median_(x.secs) };
+    });
+  }
+
+  var binOrder = { "午前便": 0, "午後便": 1 };
+  var binNames = Object.keys(binBuckets).concat(Object.keys(lines))
+    .filter(function (v, i, a) { return a.indexOf(v) === i; })
+    .sort(function (a, b) { return (a in binOrder ? binOrder[a] : 9) - (b in binOrder ? binOrder[b] : 9); });
+
+  var bins = binNames.map(function (bin) {
+    var ls = (lines[bin] || []).sort(function (a, b) { return a.start < b.start ? -1 : a.start > b.start ? 1 : 0; });
+    return { bin: bin, carriers: carrierList(binBuckets[bin] || {}), lines: ls };
+  });
+
+  var totalCarriers = carrierList(totalBuckets);
+  var persons = Object.keys(personBuckets).map(function (name) {
+    var byBin = minutesByPerson[name] || {};
+    var minutes = 0;
+    Object.keys(byBin).forEach(function (k) { minutes += byBin[k]; });
+    var cs = carrierList(personBuckets[name]).map(function (c) {
+      return { carrier: c.carrier, count: c.count, medianSec: c.medianSec };
+    });
+    var count = cs.reduce(function (n, c) { return n + c.count; }, 0);
+    return { name: name, carriers: cs, minutes: Math.round(minutes * 10) / 10, minutesByBin: byBin, count: count };
+  });
+  persons.sort(function (a, b) { return b.count - a.count; });
+
+  return {
+    date: date,
+    bins: bins,
+    total: {
+      carriers: totalCarriers,
+      longCount: totalCarriers.reduce(function (n, c) { return n + c.longCount; }, 0),
+    },
+    persons: persons,
+    health: {
+      slipCount: slipCount,
+      workCount: workCount,
+      missingOrderNo: missingOrderNo,
+      openEndings: openEndings,
+    },
+  };
+}
+
+/** 配送方法を、宅急便 → ネコポス → それ以外の順に並べる */
+function sortCarriers_(names) {
+  var order = { "宅急便": 0, "ネコポス": 1 };
+  return names.slice().sort(function (a, b) {
+    return (a in order ? order[a] : 9) - (b in order ? order[b] : 9);
+  });
+}
+
 /** 期間の選択肢から、始まりと終わりの日付と、読む月を決める */
 function periodRange_(period) {
   var now = new Date();
@@ -672,4 +833,16 @@ function debugSummary() {
       });
     });
   });
+}
+
+/**
+ * エディタから実行して、日報の数字が出るかを確かめる。今日の日付で作る。
+ * 名前・件数・時間だけをログに出す（注文番号などは出さない）。
+ */
+function debugDailyReport() {
+  var token = Utilities.getUuid();
+  CacheService.getScriptCache().put("tok_" + token, "1", 60);
+  var today = Utilities.formatDate(new Date(), tz_(), "yyyy-MM-dd");
+  var r = dailyReport(token, today);
+  console.log(JSON.stringify(r, null, 2));
 }
