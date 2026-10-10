@@ -31,7 +31,10 @@ export const IMAGE_MAP: Record<string, string> = {
   "dsisuguset001": "1z3vBx_Fw_qv9WjNaOZwmxXayvsCVhBBt",
   "dssyokigataset001": "1Gnhl8M6OKhkRIQRWuLvh849sSp1rHEWC",
   "dualshock4doublepack": "1QTrDS_vUWwHFSa3NZi-kuvOxLUzDO0Li",
+  "gameboymicrosuguset": "1-VZ4mdsVPynK40k9Z-gQ0Nf79tL1RoZs",
   "gamecubeset": "1-gYvubtjrAodNwyOZ1_xyVu9XB6Bo_AC",
+  // 2026-10-09 追加（並び順はファイル名の順にしていないが、照合はキーで行うので影響しない）
+  "tatakon-tanpin": "1h9twp2WugM4e6Bs1LCP1-827YFmVCSTY",
   "gbadvsp5color": "1R32X2kuKuN9xMlCxgugpjpDpBIwCIWhN",
   "gbapokesr2set": "1mYBSarhcmFbWCXZ4JK0m7woGEk2YiAwA",
   "gbpokemon4set": "13BtdvwriSJEZL9dn8fTzt0c4rXRygtTl",

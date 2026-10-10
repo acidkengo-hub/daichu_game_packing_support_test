@@ -35,7 +35,7 @@ export const OMAKE_SOFT_COMPAT: Record<string, string[]> = {
   "GB/GBA": ["GBAソフト"],
 };
 
-// --- デフォルトセット定義（138件） ---
+// --- デフォルトセット定義（152件） ---
 
 const DEFAULT_SETS: SetDefinition[] = [
   // ============================================================
@@ -94,8 +94,11 @@ const DEFAULT_SETS: SetDefinition[] = [
     { name: "DUALSHOCK2", qty: 1 }, { name: "AVケーブル(PS系)", qty: 1 },
     { name: "PS2メモリーカード(純正)", qty: 1 },
   ]},
+  // ミッドナイトブラック（SCPH-50000NB）は通常の厚型と棚が分かれているため、
+  // 本体を別の部品名にしてピッキングで別の行に数える（2026-10-09 現場の要望）。
+  // 付属品は通常の厚型と同じ。
   { id: "ps250101701", label: "PS2厚型 SCPH-50000NB", codes: ["ps250101701", "PS250000MB0000001"], prefixes: [], components: [
-    { name: "PS2本体(厚型)", qty: 1 }, { name: "メガネケーブル", qty: 1 },
+    { name: "PS2本体(ミッドナイトブラック)", qty: 1 }, { name: "メガネケーブル", qty: 1 },
     { name: "DUALSHOCK2", qty: 1 }, { name: "AVケーブル(PS系)", qty: 1 },
   ]},
   { id: "ps2honntaijunseimem", label: "PS2厚型 純正メモカ付すぐ遊べる", codes: ["ps2honntaijunseimem"], prefixes: [], components: [
@@ -104,7 +107,7 @@ const DEFAULT_SETS: SetDefinition[] = [
     { name: "PS2メモリーカード(純正)", qty: 1 },
   ]},
   { id: "2679-002774", label: "PS2 SCPH-50000NB すぐ遊べる", codes: ["2679-002774"], prefixes: [], components: [
-    { name: "PS2本体(厚型)", qty: 1 }, { name: "メガネケーブル", qty: 1 },
+    { name: "PS2本体(ミッドナイトブラック)", qty: 1 }, { name: "メガネケーブル", qty: 1 },
     { name: "DUALSHOCK2", qty: 1 }, { name: "AVケーブル(PS系)", qty: 1 },
   ]},
   { id: "ps220260219001", label: "PS2厚型 コントローラー2個+メモカ2種", codes: ["ps220260219001"], prefixes: [], components: [
@@ -241,7 +244,8 @@ const DEFAULT_SETS: SetDefinition[] = [
   // PS3 後期型 (CECH-4000)
   // ※USBケーブル(miniB/太)は.md未記載だが実際は同梱（補完済み）
   // ============================================================
-  { id: "ps3403set213001", label: "PS3後期型 250GB", codes: ["ps3403set213001", "ps3-4000j1suguasoberu"], prefixes: [], components: [
+  // ps34300500g（4300C 500GB チャコールブラック）も中身は同じ。容量の違いは本体内部なので部品名は共通
+  { id: "ps3403set213001", label: "PS3後期型 250GB/500GB", codes: ["ps3403set213001", "ps3-4000j1suguasoberu", "ps34300500g"], prefixes: [], components: [
     { name: "PS3本体(後期型)", qty: 1 }, { name: "メガネケーブル", qty: 1 },
     { name: "DUALSHOCK3", qty: 1 }, { name: "USBケーブル(miniB/太)", qty: 1 },
     { name: "HDMIケーブル", qty: 1 },
@@ -302,6 +306,15 @@ const DEFAULT_SETS: SetDefinition[] = [
   // 部品名は "メガネケーブル"（他PS系セットと合算される集約キー）のまま据え置き、
   // 梱包時のアラートで確認を促す方式にした。
   { id: "ps4projyunsei", label: "PS4 Pro 純正コントローラー付", codes: ["ps4projyunsei"], prefixes: [], components: [
+    { name: "PS4 Pro本体", qty: 1 }, { name: "メガネケーブル", qty: 1 },
+    { name: "DUALSHOCK4", qty: 1 }, { name: "USBケーブル(microB/細)", qty: 1 },
+    { name: "HDMIケーブル", qty: 1 },
+  ], packingAlerts: ["本体の型番を確認し、メガネケーブルか二芯ケーブルか正しい方を入れましたか？"]},
+  // 属性1でカラー（jb ジェットブラック / gw グレイシャーホワイト）、
+  // 属性2でコントローラーの数（con1 / con2）を選ぶ。
+  // ここはコントローラー1個の既定値。con2 のときの切り替えは parsers.ts の buildProduct で行う。
+  // カラーはピッキングの集約で部品名に付く（isColorRelevant）ので、ここでは分けない。
+  { id: "ps4projyunsei002", label: "PS4 Pro 純正コントローラー付(カラー・個数選択)", codes: ["ps4projyunsei002"], prefixes: [], components: [
     { name: "PS4 Pro本体", qty: 1 }, { name: "メガネケーブル", qty: 1 },
     { name: "DUALSHOCK4", qty: 1 }, { name: "USBケーブル(microB/細)", qty: 1 },
     { name: "HDMIケーブル", qty: 1 },
@@ -468,6 +481,11 @@ const DEFAULT_SETS: SetDefinition[] = [
   ]},
   { id: "gbadvsp5color", label: "GBA SP すぐ遊べるセット", codes: ["gbadvsp5color"], prefixes: [], components: [
     { name: "GBA SP本体", qty: 1 }, { name: "ACアダプタ(GBA SP)", qty: 1 },
+    { name: "おまけソフト(GBA)", qty: 1 },
+  ]},
+  // おまけソフトは GBA SP と同じ部品名にして、ピッキングで合算する
+  { id: "gameboymicrosuguset", label: "GBミクロ すぐ遊べるセット", codes: ["gameboymicrosuguset"], prefixes: [], components: [
+    { name: "GBミクロ本体", qty: 1 }, { name: "USBケーブル(GBミクロ充電用)", qty: 1 },
     { name: "おまけソフト(GBA)", qty: 1 },
   ]},
   { id: "gbapokesr2set", label: "GBA ポケモン ルビー&サファイア", codes: ["gbapokesr2set"], prefixes: [], components: [
@@ -710,6 +728,10 @@ const DEFAULT_SETS: SetDefinition[] = [
     { name: "WiiUソフト「太鼓の達人特盛り」", qty: 1 },
     { name: "タタコン本体", qty: 2 }, { name: "バチ", qty: 4 }, { name: "タタコン台座", qty: 2 },
     { name: "Wiiリモコン", qty: 2 },
+  ]},
+  // タタコン単品（ソフトなし）。部品名は太鼓の達人セットと同じにして、ピッキングで合算する
+  { id: "tatakon-tanpin", label: "タタコン 単品(バチ2本・台座付)", codes: ["tatakon-tanpin"], prefixes: [], components: [
+    { name: "タタコン本体", qty: 1 }, { name: "バチ", qty: 2 }, { name: "タタコン台座", qty: 1 },
   ]},
 
   // ============================================================

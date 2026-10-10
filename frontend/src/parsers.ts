@@ -98,6 +98,7 @@ const COL = {
   ATTR1_GROUP:   16,   // 属性グループ１名（「カラー」「セット内容」等）
   ATTR1_CODE:    17,   // 属性１コード（SKUの一部。表示名より安定した判定キー）
   ATTR1_NAME:    18,   // 属性１名
+  ATTR2_CODE:    20,   // 属性２コード（ps4projyunsei002 のコントローラー数の判定に使う）
   ATTR2_NAME:    21,   // 属性２名
   QTY:           36,   // 数量
   SKU_CODE:      40,   // SKUコード
@@ -186,6 +187,7 @@ function buildProduct(row: string[]): Product {
   // 属性1コードは表示名と違いモール管理画面での文言変更に影響されない。
   // 大小の揺れに備えて小文字で保持する
   const attr1Code = getField(row, COL.ATTR1_CODE).toLowerCase();
+  const attr2Code = getField(row, COL.ATTR2_CODE).toLowerCase();
   let platform: Platform | string = detectPlatform(shortName, code);
 
   // Switch 2 判定（商品コード or 商品名から。既存Switchより優先）
@@ -285,6 +287,16 @@ function buildProduct(row: string[]): Product {
         { name: "RAMアダプター(ディスクシステム)", qty: 1 },
       ];
     }
+  }
+
+  // PS4 Pro（ps4projyunsei002）のコントローラー数: 属性2コードで切り替える
+  //   con1 → セット定義の既定値（コントローラー1個・USBケーブル1本）
+  //   con2 → コントローラー2個・USBケーブル2本（DUALSHOCK4 2個セットに合わせる）
+  // 表示名（「1個」「2個」）ではなく属性2コードで判定する。理由はディスクシステムと同じ
+  if (setDef && setDef.id === "ps4projyunsei002" && attr2Code === "con2") {
+    components = components.map((c) =>
+      c.name === "DUALSHOCK4" || c.name === "USBケーブル(microB/細)" ? { ...c, qty: 2 } : c
+    );
   }
 
   // ポケモン用梱包アラート
