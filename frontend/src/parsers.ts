@@ -98,7 +98,7 @@ const COL = {
   ATTR1_GROUP:   16,   // 属性グループ１名（「カラー」「セット内容」等）
   ATTR1_CODE:    17,   // 属性１コード（SKUの一部。表示名より安定した判定キー）
   ATTR1_NAME:    18,   // 属性１名
-  ATTR2_CODE:    20,   // 属性２コード（ps4projyunsei002 のコントローラー数の判定に使う）
+  ATTR2_CODE:    20,   // 属性２コード（PS4 のコントローラー数の判定に使う。CON2_ATTR を参照）
   ATTR2_NAME:    21,   // 属性２名
   QTY:           36,   // 数量
   SKU_CODE:      40,   // SKUコード
@@ -289,14 +289,28 @@ function buildProduct(row: string[]): Product {
     }
   }
 
-  // PS4 Pro（ps4projyunsei002）のコントローラー数: 属性2コードで切り替える
-  //   con1 → セット定義の既定値（コントローラー1個・USBケーブル1本）
-  //   con2 → コントローラー2個・USBケーブル2本（DUALSHOCK4 2個セットに合わせる）
-  // 表示名（「1個」「2個」）ではなく属性2コードで判定する。理由はディスクシステムと同じ
-  if (setDef && setDef.id === "ps4projyunsei002" && attr2Code === "con2") {
-    components = components.map((c) =>
-      c.name === "DUALSHOCK4" || c.name === "USBケーブル(microB/細)" ? { ...c, qty: 2 } : c
-    );
+  // PS4 のコントローラー数: 属性コードが "con2" で終わるとき、
+  // コントローラー2個・USBケーブル2本にする（DUALSHOCK4 2個セットに合わせる）。
+  // それ以外はセット定義の既定値（1個・1本）のまま。
+  //
+  // 商品によって、個数を選ぶ属性が違う:
+  //   ps4projyunsei002     … 属性2で個数を選ぶ（con1 / con2）
+  //   ps4jyunsei200020200  … 属性1に色と個数がまとめて入る
+  //                           （ps420jb5 / ps420gw5 / ps420jb5con2 / ps420jgw5con2）
+  // 完全一致ではなく「con2 で終わるか」で判定する。ホワイトの2個セットだけ
+  // ps420jgw5con2 と形が揃っていないため（2026-11-03 にモール側の設定で確認）。
+  // 表示名（「2個」「コントローラー2個セット」）ではなくコードで判定する。理由はディスクシステムと同じ
+  const CON2_ATTR: Record<string, "attr1" | "attr2"> = {
+    ps4projyunsei002: "attr2",
+    ps4jyunsei200020200: "attr1",
+  };
+  if (setDef && setDef.id in CON2_ATTR) {
+    const attrCode = CON2_ATTR[setDef.id] === "attr1" ? attr1Code : attr2Code;
+    if (attrCode.endsWith("con2")) {
+      components = components.map((c) =>
+        c.name === "DUALSHOCK4" || c.name === "USBケーブル(microB/細)" ? { ...c, qty: 2 } : c
+      );
+    }
   }
 
   // ポケモン用梱包アラート

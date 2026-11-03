@@ -1523,6 +1523,21 @@ export default function App() {
     // 全商品のセットチェックリストを構築
     const allCheckItems: { label: string; key: string; isAlert?: boolean; index?: number; total?: number }[] = [];
 
+    // 沖縄県宛のリチウム電池シール（2026-11-03 現場の要望）。
+    // リチウム電池を含む商品（ゲーム機本体・バッテリー等）を沖縄県に送るときは、
+    // 航空輸送のシールを貼らないと船便になり、届くのが遅れる。
+    // どの商品にリチウム電池が入っているかをツールが判定すると、外したときに
+    // 貼り忘れにつながるため、沖縄県宛なら商品に関わらず毎回出す（宅急便・ネコポスとも）。
+    // 住所の書き方が揺れても拾えるよう、郵便番号（沖縄県は 900〜908 番台だけ）でも判定する。
+    const isOkinawa =
+      currentOrder.recipientAddr.trim().startsWith("沖縄") ||
+      currentOrder.recipientPostal.replace(/[^0-9]/g, "").startsWith("90");
+    if (isOkinawa) {
+      const okinawaAlert =
+        "✈️ 沖縄県宛：リチウム電池を含む商品（ゲーム機本体・バッテリー等）なら、航空輸送シールを貼りましたか？";
+      allCheckItems.push({ label: okinawaAlert, key: `alert_${okinawaAlert}`, isAlert: true });
+    }
+
     // チラシ同梱アラート（楽天・ヤフショのみ、設定でON時）
     //   ヤマト宅急便 → 商品によらず常に表示
     //   ヤマトネコポス → 本体を含む商品 or PSPオリジナルバッテリーがある場合のみ表示
@@ -1795,7 +1810,13 @@ export default function App() {
                   {shop.label}
                 </span>
               </div>
-              <p className="text-sm text-gray-400 mt-1">
+              {/* 沖縄県宛は住所を赤く太字にする。アラートを読み飛ばしても伝票の上で気づけるように */}
+              <p className={`mt-1 ${isOkinawa ? "text-base font-bold text-red-400" : "text-sm text-gray-400"}`}>
+                {isOkinawa && (
+                  <span className="inline-block mr-2 px-2 py-0.5 rounded bg-red-600 text-white text-sm">
+                    ✈️ 沖縄県宛
+                  </span>
+                )}
                 〒{currentOrder.recipientPostal} {currentOrder.recipientAddr}
               </p>
               <p className="text-sm text-gray-500 mt-1">

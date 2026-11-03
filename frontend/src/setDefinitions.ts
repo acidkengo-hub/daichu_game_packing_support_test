@@ -35,7 +35,7 @@ export const OMAKE_SOFT_COMPAT: Record<string, string[]> = {
   "GB/GBA": ["GBAソフト"],
 };
 
-// --- デフォルトセット定義（152件） ---
+// --- デフォルトセット定義（154件） ---
 
 const DEFAULT_SETS: SetDefinition[] = [
   // ============================================================
@@ -186,6 +186,16 @@ const DEFAULT_SETS: SetDefinition[] = [
     { name: "AVケーブル(PS系)", qty: 1 },
   ]},
 
+  // メルカリ専売: PS2薄型70000番台 シルバー（メモリーカードなし）
+  // 白・黒と同じく色が商品コードで固定なので、本体の部品名に色を入れる
+  { id: "merukari1001", label: "PS2薄型70000 すぐ遊べる(シルバー/メルカリ専売)", codes: ["merukari1001"], prefixes: [], components: [
+    { name: "PS2本体(薄型/70000・シルバー)", qty: 1 },
+    { name: "DUALSHOCK2", qty: 1 },
+    { name: "ACアダプタ(PS2薄型)", qty: 1 },
+    { name: "メガネケーブル", qty: 1 },
+    { name: "AVケーブル(PS系)", qty: 1 },
+  ]},
+
   // --- PS2薄型 90000番台 ---
   // ★90000番台はACアダプタ不要（メガネケーブルを本体に直挿しできる）。
   //   70000番台は専用ACアダプタが必要なため、本体の正規化名も型番別に分けている。
@@ -248,6 +258,12 @@ const DEFAULT_SETS: SetDefinition[] = [
   { id: "ps3403set213001", label: "PS3後期型 250GB/500GB", codes: ["ps3403set213001", "ps3-4000j1suguasoberu", "ps34300500g"], prefixes: [], components: [
     { name: "PS3本体(後期型)", qty: 1 }, { name: "メガネケーブル", qty: 1 },
     { name: "DUALSHOCK3", qty: 1 }, { name: "USBケーブル(miniB/太)", qty: 1 },
+    { name: "HDMIケーブル", qty: 1 },
+  ]},
+
+  // PS3 後期型 本体のみ（電源・HDMI付。コントローラーなし）
+  { id: "ps340hont21301", label: "PS3後期型 本体のみ(電源・HDMI付)", codes: ["ps340hont21301"], prefixes: [], components: [
+    { name: "PS3本体(後期型)", qty: 1 }, { name: "メガネケーブル", qty: 1 },
     { name: "HDMIケーブル", qty: 1 },
   ]},
 
